@@ -12,6 +12,7 @@
   "dependencies": {
     "@livekit/components-react": "^2.9.0",
     "@livekit/components-styles": "^1.1.4",
+    "@livekit/krisp-noise-filter": "0.3.4",
     "livekit-client": "^2.9.0",
     "livekit-server-sdk": "^2.9.0",
     "next": "^15.5.4",

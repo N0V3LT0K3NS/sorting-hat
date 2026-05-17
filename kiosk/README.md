@@ -8,20 +8,81 @@ This is a minimal Next.js app (App Router, TypeScript). It is **voice-only
 from the visitor's perspective** — there is no on-screen survey and no text
 fallback. That is one of the project's four locked constraints.
 
+It is built to run **fullscreen on a dedicated single-station machine**: one
+computer, one good microphone, one speaker, browser launched in kiosk mode.
+The kiosk runs many interviews back to back unattended.
+
 ## The three screens
 
-A single state machine: `idle → active → complete`.
+A single state machine: `idle → active → complete → (auto-reset) → idle`.
 
 1. **Idle** — "Ready when you are." One large button: _Press to begin_.
+   If the microphone is blocked or missing, a calm message appears here
+   (see _Audio robustness_ below) — never a broken Active screen.
 2. **Active** — a minimal agent waveform (`BarVisualizer`) and a subtle
    speaking indicator. **No transcript by default** — seeing one's own
    words changes the dynamic of the interview. A hidden hotspot in the
    bottom-right corner toggles a developer transcript view.
-3. **Complete** — "Thank you. Your portrait is being made."
+3. **Complete** — "Thank you. Your portrait is being made." After a short
+   pause the kiosk resets itself to Idle for the next visitor.
 
 Black background, a single warm amber accent, large readable type, and
 calm fade transitions with a slow breathing glow so the idle screen never
 feels dead.
+
+## Session lifecycle
+
+Pressing _begin_ runs an explicit, bounded lifecycle. Each step is designed
+so a kiosk can run hundreds of sessions without an attendant and without
+state leaking from one visitor to the next.
+
+```
+  ┌─ idle ─────────────────────────────────────────────────────────┐
+  │  visitor presses "Press to begin"                               │
+  └──────────────┬──────────────────────────────────────────────────┘
+                 │ 1. AUDIO PREFLIGHT
+                 │    Probe the microphone with getUserMedia. If access
+                 │    is denied or no device is present, show a calm
+                 │    message on the Idle screen and stop here.
+                 │ 2. FULLSCREEN
+                 │    Best-effort requestFullscreen() inside the click
+                 │    gesture (the OS kiosk flag is the real guarantee).
+                 │ 3. MINT TOKEN
+                 │    GET /api/token → a LiveKit access token for a
+                 │    fresh, randomly-named room (interview-xxxxxx).
+                 ▼
+  ┌─ active ────────────────────────────────────────────────────────┐
+  │  4. JOIN ROOM                                                    │
+  │     <LiveKitRoom> connects the browser to the room over WebRTC;  │
+  │     the visitor's microphone publishes automatically.            │
+  │  5. AGENT DISPATCH                                               │
+  │     The Python agent worker is dispatched into that room and     │
+  │     joins as the interviewer. An on-screen watchdog ends the     │
+  │     session calmly if the worker never appears (~30 s).          │
+  │  6. NOISE CANCELLATION                                           │
+  │     Krisp enhanced cancellation is enabled on the mic track;     │
+  │     WebRTC echo/noise suppression runs underneath as a baseline. │
+  │  7. INTERVIEW                                                    │
+  │     ~10–15 min of voice conversation.                            │
+  └──────────────┬──────────────────────────────────────────────────┘
+                 │ 8. END
+                 │    The agent ends the interview and the room
+                 │    disconnects — OR the visitor walks away and the
+                 │    connection drops — OR a connection error occurs.
+                 │    All three end the session gracefully.
+                 ▼
+  ┌─ complete ──────────────────────────────────────────────────────┐
+  │  9. CLEAN UP + RESET                                             │
+  │     The <LiveKitRoom> unmounts: livekit-client tears down the    │
+  │     WebRTC peer connection and releases the microphone. After a  │
+  │     short dwell the kiosk returns to Idle, fully reset.          │
+  └─────────────────────────────────────────────────────────────────┘
+```
+
+**No state leaks between sessions.** Every session gets a fresh token, a
+fresh room name, and a fresh `<LiveKitRoom>` instance — the component is
+remounted via a changing React `key` on every reset, so no connection,
+microphone handle, or processor survives into the next visitor's session.
 
 ## How it connects to the Python agent
 
@@ -39,15 +100,50 @@ visitor  ──audio──▶  browser (this kiosk)  ──WebRTC──▶  Live
   randomly-named room.
 - `<LiveKitRoom>` connects the browser to that room over WebRTC; the
   visitor's microphone audio publishes automatically.
-- The Python agent worker (started separately — see the repo root README
-  and `agent/main.py`) is dispatched into the room and joins as the
-  interviewer. Audio I/O is browser WebRTC throughout.
+- The Python agent worker (started separately — see _Running the agent
+  worker_ below) is dispatched into the room and joins as the interviewer.
+  Audio I/O is browser WebRTC throughout.
 - When the agent ends the interview the room disconnects, and the kiosk
   advances to the Complete screen.
 
 The kiosk needs the **same LiveKit project credentials** the Python agent
 uses. STT/TTS are handled by LiveKit Inference on the agent side; the
-kiosk only does audio transport and visualization.
+kiosk only does audio transport, noise cancellation, and visualization.
+
+## Noise cancellation
+
+The kiosk lives in a public space — background chatter, footfall, HVAC,
+music. Rough mic audio degrades the agent's turn detection and
+transcription quality, so noise is cancelled **at the source** in the
+browser, before audio is published:
+
+- **Enhanced cancellation (Krisp).** The `<NoiseCancellation>` component
+  uses `useKrispNoiseFilter` from `@livekit/components-react/krisp` to
+  apply LiveKit's enhanced noise filter to the microphone track. This is a
+  LiveKit Cloud feature and requires the `@livekit/krisp-noise-filter`
+  package (already a dependency).
+- **WebRTC suppression (baseline).** The `<LiveKitRoom>` audio capture
+  options also enable the browser's own `echoCancellation`,
+  `noiseSuppression`, and `autoGainControl`.
+
+If a browser cannot run the Krisp filter (unsupported / older Safari) the
+hook logs a warning and the session continues on the WebRTC baseline —
+never a hard failure.
+
+## Audio robustness
+
+A kiosk must degrade calmly when audio hardware misbehaves:
+
+- **Before joining**, `checkAudioInput()` probes the microphone with
+  `getUserMedia`. A denied permission, a missing device, a mic held by
+  another app, or an unsupported browser each produces a short, specific
+  message on the **Idle** screen. The visitor never reaches a broken
+  Active screen.
+- **During a session**, a disconnect, a connection error, or a media
+  device failure all route to the same graceful Complete → reset path.
+- **If the agent worker never joins** the room, an on-screen watchdog ends
+  the session after ~30 seconds rather than stranding the visitor on a
+  frozen "Connecting…" screen.
 
 ## Setup
 
@@ -80,5 +176,93 @@ npm run build    # production build
 npm run start    # serve the production build
 ```
 
-For the kiosk deployment, run `npm run build` then `npm run start` and
-open the browser fullscreen (kiosk mode) on the kiosk computer.
+## Hardware setup — a single-station install
+
+The kiosk is one computer with one microphone and one speaker, running
+this app fullscreen, plus the Python agent worker.
+
+### 1. The machine
+
+- A dedicated computer — nothing else running on it during sessions.
+- Wired Ethernet if possible (Wi-Fi works, but the room connection is
+  more stable on a wire in a crowded venue).
+- The display at a comfortable standing height.
+
+### 2. Microphone placement
+
+- Use a **good external microphone** — a USB cardioid or a boundary mic.
+  The built-in laptop mic is the single biggest quality drop.
+- Place it **~12–18 inches (30–45 cm)** from where the visitor's face
+  will be — close enough for a strong signal, far enough to avoid plosives
+  and breath noise.
+- Point it at the visitor and away from the speaker, to reduce the speaker
+  audio bleeding back into the mic.
+- Set it as the **system default input device** before launching the
+  browser. The kiosk uses whatever the OS default input is.
+
+### 3. Speaker
+
+- An external speaker, positioned so the agent's voice is clearly audible
+  but **not** aimed straight back into the microphone.
+- Set a comfortable volume during the smoke test (see `SMOKE_TEST.md`) —
+  loud enough to hear over venue noise, not so loud it causes echo.
+
+### 4. Running the frontend fullscreen
+
+Build and serve the production app, then launch the browser in kiosk mode
+so there is no address bar, no tabs, and no way to navigate away:
+
+```sh
+cd kiosk
+npm run build
+npm run start            # serves http://localhost:3000
+```
+
+Launch a browser in kiosk mode pointed at the app, e.g. Chrome/Chromium:
+
+```sh
+chromium --kiosk --app=http://localhost:3000 \
+  --autoplay-policy=no-user-gesture-required \
+  --disable-pinch --overscroll-history-navigation=0
+```
+
+The app also hardens itself from inside the page: no scrollbars, no text
+selection, no right-click menu, no pinch/keyboard zoom, no drag-and-drop,
+and a best-effort `requestFullscreen()` on the first button press. The
+OS-level kiosk flag remains the real fullscreen guarantee; the in-page
+guards cover the gaps.
+
+### 5. Running the Python agent worker
+
+The interviewer is a separate Python process. From the **repo root** (not
+`kiosk/`), with the repo's `.env` configured (see the root `README.md`):
+
+```sh
+uv run python -m agent.main start
+```
+
+This starts a LiveKit Agents worker that registers with the same LiveKit
+project. When the kiosk creates a room and a visitor joins, the worker is
+dispatched into that room and runs one interview. It handles many rooms
+over its lifetime — leave it running for the duration of the install.
+
+The kiosk frontend and the agent worker are **independent processes** that
+only ever meet inside a LiveKit room. They can run on the same machine or
+on different machines, as long as both use the same LiveKit credentials.
+
+### 6. How a session resets for the next person
+
+When an interview ends — the agent finishes, or the visitor leaves and the
+connection drops — the kiosk shows the Complete screen briefly, tears down
+the LiveKit room (releasing the microphone), and returns to Idle on its
+own. No attendant action is needed between visitors. If an attendant ever
+needs to force a reset, reloading the page returns the kiosk to a clean
+Idle state.
+
+## Smoke test
+
+Real hardware and live LiveKit credentials may not be present in every
+environment. A documented manual lifecycle smoke-test checklist lives in
+[`SMOKE_TEST.md`](./SMOKE_TEST.md) — run it on the actual kiosk machine
+before an install. The production build (`npm run build`) is the automated
+check and must always pass.
