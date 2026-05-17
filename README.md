@@ -46,6 +46,8 @@ truthful portrait?**
   `classify` -> `fill` -> `render` -> `deliver`. Not in LiveKit.
 - **Kiosk** — a minimal Next.js frontend: Idle / Active / Complete.
 
+All LLM calls route through OpenRouter; STT/TTS through LiveKit Inference.
+
 See [`docs/GOALS.md`](docs/GOALS.md) for the full build plan.
 
 ---

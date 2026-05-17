@@ -141,25 +141,6 @@ wheels = [
 ]
 
 [[package]]
-name = "anthropic"
-version = "0.102.0"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "anyio" },
-    { name = "distro" },
-    { name = "docstring-parser" },
-    { name = "httpx" },
-    { name = "jiter" },
-    { name = "pydantic" },
-    { name = "sniffio" },
-    { name = "typing-extensions" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/b9/47/cb2a71f70431fb09af4db83e3ea89eb2dd8e0e348d27af53ed32e6c599dd/anthropic-0.102.0.tar.gz", hash = "sha256:96f747cad11886c4ae12d4080131b94eebd68b202bd2190fe27959031bb1fa9c", size = 763697, upload-time = "2026-05-13T18:12:41.624Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/87/75/0f6c603594876413bc858a00e7cc0d80a0cc14edf5c7b959a3ea6ec45e44/anthropic-0.102.0-py3-none-any.whl", hash = "sha256:ab96540bbd4b0f36564252d955a86f8abbe4f00944a24bc9931acc9b139bab6f", size = 763070, upload-time = "2026-05-13T18:12:43.474Z" },
-]
-
-[[package]]
 name = "anyio"
 version = "4.13.0"
 source = { registry = "https://pypi.org/simple" }
@@ -520,23 +501,6 @@ wheels = [
 ]
 
 [[package]]
-name = "groq"
-version = "1.2.0"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "anyio" },
-    { name = "distro" },
-    { name = "httpx" },
-    { name = "pydantic" },
-    { name = "sniffio" },
-    { name = "typing-extensions" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/27/51/4728c13611849ff6cf8536740ae78ba3ee5e665d67b572a47c9ead0f9788/groq-1.2.0.tar.gz", hash = "sha256:85459e27c9c17f22404349c785cd08680362cfe85e07cc060be46c4832f108c3", size = 155609, upload-time = "2026-04-18T10:43:50.68Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/0c/82/748639c95c60ad8846c65b167ca611c815d06d5f67a9e73b23486dce4fdf/groq-1.2.0-py3-none-any.whl", hash = "sha256:1002060a743b27c8f86765e1bc9749c98498e961d9fe2e4902bf7804a71c3c84", size = 142334, upload-time = "2026-04-18T10:43:49.125Z" },
-]
-
-[[package]]
 name = "grpcio"
 version = "1.80.0"
 source = { registry = "https://pypi.org/simple" }
@@ -839,9 +803,6 @@ wheels = [
 ]
 
 [package.optional-dependencies]
-anthropic = [
-    { name = "livekit-plugins-anthropic" },
-]
 cartesia = [
     { name = "livekit-plugins-cartesia" },
 ]
@@ -850,9 +811,6 @@ codecs = [
 ]
 deepgram = [
     { name = "livekit-plugins-deepgram" },
-]
-groq = [
-    { name = "livekit-plugins-groq" },
 ]
 images = [
     { name = "pillow" },
@@ -911,20 +869,6 @@ wheels = [
 ]
 
 [[package]]
-name = "livekit-plugins-anthropic"
-version = "1.5.9"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "anthropic" },
-    { name = "httpx" },
-    { name = "livekit-agents" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/6f/3c/831a6521ce85030b3a167ef0195bd3f9a5f59bc81d9471eb797f37bbe876/livekit_plugins_anthropic-1.5.9.tar.gz", hash = "sha256:bc846b71499c192d3096685c6b87f8927afb3ce16d40125889abf56af3507eea", size = 9243, upload-time = "2026-05-13T19:53:31.911Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/c0/bb/41352235cfd8f1cb76ed803af96c907650faf1ceafd029446d6840892c83/livekit_plugins_anthropic-1.5.9-py3-none-any.whl", hash = "sha256:68d5a2e94ff2d0e9518b68c5d59425d040e75936782b1e878e7d63060b52dfcd", size = 11000, upload-time = "2026-05-13T19:53:30.445Z" },
-]
-
-[[package]]
 name = "livekit-plugins-cartesia"
 version = "1.5.9"
 source = { registry = "https://pypi.org/simple" }
@@ -947,20 +891,6 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/c0/ef/c8b5aaffd05981c66b4a6fed901df832dcc4fdcb7a77d8eb65358c850f90/livekit_plugins_deepgram-1.5.9.tar.gz", hash = "sha256:7dd131124b259fca98e628e4bc918ffad1f0e1db871b0de3a0418e0d264368f9", size = 18281, upload-time = "2026-05-13T19:54:09.004Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/49/c2/28c2707d3255acd95a9208c6520ee2a4592c4ec61edba0cc92091d969ef3/livekit_plugins_deepgram-1.5.9-py3-none-any.whl", hash = "sha256:6172984c66d7854b2398457ffe1ea758ce63aab5c4e691c4e2d1a9191ebdc016", size = 22999, upload-time = "2026-05-13T19:54:07.505Z" },
-]
-
-[[package]]
-name = "livekit-plugins-groq"
-version = "1.5.9"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "aiohttp" },
-    { name = "livekit" },
-    { name = "livekit-agents", extra = ["codecs", "openai"] },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/d1/25/874512286b46866b4d29289f1a03d074bc30675b287c4841bdc6cbedaf00/livekit_plugins_groq-1.5.9.tar.gz", hash = "sha256:b7a7271a8f4c9102720009d7f5be51aef212a29fd7c936bf78325df079fbb22e", size = 6133, upload-time = "2026-05-13T19:54:29.525Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/60/8b/1fb2f076ba7a42242b2db1e50e64a5154f4499c908bc85edc70b9f9325f1/livekit_plugins_groq-1.5.9-py3-none-any.whl", hash = "sha256:9661165870daaa9de5f1b400b68b3c549e4e740a1382cdeb0f92516375a611cb", size = 7319, upload-time = "2026-05-13T19:54:28.373Z" },
 ]
 
 [[package]]
@@ -2078,9 +2008,8 @@ name = "sorting-hat"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
-    { name = "anthropic" },
-    { name = "groq" },
-    { name = "livekit-agents", extra = ["anthropic", "cartesia", "deepgram", "groq", "silero", "turn-detector"] },
+    { name = "livekit-agents", extra = ["cartesia", "deepgram", "openai", "silero", "turn-detector"] },
+    { name = "openai" },
     { name = "pillow" },
     { name = "pydantic" },
     { name = "python-dotenv" },
@@ -2096,9 +2025,8 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "anthropic", specifier = ">=0.69.0" },
-    { name = "groq", specifier = ">=0.13.0" },
-    { name = "livekit-agents", extras = ["anthropic", "deepgram", "cartesia", "groq", "silero", "turn-detector"], specifier = ">=1.5.9" },
+    { name = "livekit-agents", extras = ["openai", "deepgram", "cartesia", "silero", "turn-detector"], specifier = ">=1.5.9" },
+    { name = "openai", specifier = ">=1.60.0" },
     { name = "pillow", specifier = ">=11.0.0" },
     { name = "pydantic", specifier = ">=2.10.0" },
     { name = "python-dotenv", specifier = ">=1.0.1" },

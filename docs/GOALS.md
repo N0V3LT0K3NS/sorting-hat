@@ -51,14 +51,19 @@ Every dispatched goal's completion condition ends with:
 ### G2 · Single LiveKit voice agent (walking skeleton) — `PENDING` · CC
 - **Context:** The brief's step 1. One agent that simply talks, on the
   current LiveKit stack. No interview logic. Proves low-latency voice works.
-- **Outcome:** `agent/main.py` runs an `AgentSession` + one `Agent` using
-  LiveKit Inference (Deepgram Flux STT, Cartesia Sonic-3 TTS), native turn
-  detector + interruption classifier, preemptive generation on.
+- **Outcome:** `agent/main.py` runs an `AgentSession` + one `Agent`.
+  STT/TTS via LiveKit Inference (Deepgram Flux STT, Cartesia Sonic-3 TTS);
+  LLM via OpenRouter (OpenAI-compatible — the LiveKit OpenAI plugin pointed
+  at `base_url=https://openrouter.ai/api/v1`). Native turn detector +
+  interruption classifier, preemptive generation on. Measure and log
+  end-of-user-speech -> start-of-agent-speech latency.
 - **In-scope:** `agent/main.py`, `agent/config.py`.
 - **Proving command:** `uv run python -m agent.main --dry-run` (validates
   session wiring without a live room; exits 0).
 - **Completion:** proving command exits 0; config loads; missing keys
-  degrade gracefully with a logged warning.
+  degrade gracefully with a logged warning. Smoke-test confirms the chosen
+  interviewer model token-streams through the OpenRouter route (streaming +
+  custom base_url is the one fragile spot).
 
 ### G3 · `InterviewerAgent` persona + base 5 questions — `PENDING` · CC + HERMES
 - **Context:** The brief's step 2. The persona prompt absorbs `prompter`'s
@@ -104,14 +109,16 @@ Every dispatched goal's completion condition ends with:
 ### G9 · `classify(transcript_xml) -> label` — `PENDING` · CX
 - **Outcome:** `pipeline/classify.py` + `prompts/classify.md`. Authoritative
   classification: template + confidence + reasoning. Transcript passed as
-  escaped XML. Importable and standalone.
+  escaped XML. Importable and standalone. LLM call via OpenRouter (the
+  OpenAI SDK pointed at the OpenRouter base URL).
 - **In-scope:** `pipeline/classify.py`, `prompts/classify.md`,
   `tests/test_classify.py`, `tests/fixtures/`.
 - **Proving command:** `uv run pytest tests/test_classify.py -v`
 
 ### G10 · `fill(label, transcript_xml, probe_result) -> typed_result` — `PENDING` · CX
 - **Outcome:** `pipeline/fill.py` + `prompts/fill.md`. Structured-output
-  slot-filling, char limits enforced per template.
+  slot-filling, char limits enforced per template. LLM call via OpenRouter
+  (the OpenAI SDK pointed at the OpenRouter base URL).
 - **In-scope:** `pipeline/fill.py`, `prompts/fill.md`, `tests/test_fill.py`.
 - **Proving command:** `uv run pytest tests/test_fill.py -v`
 
@@ -145,7 +152,8 @@ Every dispatched goal's completion condition ends with:
 
 ### G14 · Background classifier (observer pattern) — `PENDING` · CC
 - **Context:** The brief's step 6. `asyncio.create_task` after each user
-  turn; Groq-hosted fast model; sub-200ms; timeout-guarded so failure never
+  turn; a fast small model via OpenRouter (Llama/Qwen-class, routed to a
+  fast provider); off the critical path; timeout-guarded so failure never
   stalls the interview; writes signal weights to `userdata`.
 - **In-scope:** `agent/classifier.py`, `agent/interviewer.py`,
   `tests/test_classifier.py`.

@@ -4,9 +4,8 @@ version = "0.1.0"
 description = "A voice-AI kiosk that interviews a person and hands back the shape of themselves, drawn in a meme."
 requires-python = ">=3.12"
 dependencies = [
-    "livekit-agents[anthropic,deepgram,cartesia,groq,silero,turn-detector]>=1.5.9",
-    "anthropic>=0.69.0",
-    "groq>=0.13.0",
+    "livekit-agents[openai,deepgram,cartesia,silero,turn-detector]>=1.5.9",
+    "openai>=1.60.0",
     "pillow>=11.0.0",
     "qrcode[pil]>=8.0",
     "python-dotenv>=1.0.1",
