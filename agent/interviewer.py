@@ -1,27 +1,47 @@
-"""sorting-hat — G3: the InterviewerAgent persona.
+"""sorting-hat — G3 persona + G8 supervisor routing.
 
-This is the brief's step 2. The :class:`InterviewerAgent` is the warm voice
-the interviewee actually talks to. It owns the five base diagnostic
-questions, asks them in order, handles follow-ups, and wraps up.
+This is the brief's step 2 and step 4. The :class:`InterviewerAgent` is the
+warm voice the interviewee actually talks to. It owns the five base
+diagnostic questions, asks them in order, handles follow-ups — and, once the
+base interview is done, acts as the **supervisor**: it reads the accumulated
+signal weights, invokes the matching probe sub-interview, pivots to the
+next-strongest probe on a thin result, and closes when a probe lands.
 
-What G3 deliberately does NOT include: probe sub-interviews, classification,
-and supervisor routing. Those land in G4–G8. There is a single clearly
-marked TODO below where the G8 routing hook attaches.
+G3 built the base interview. G4–G7 built the four probe ``AgentTask``s. G8
+(this file's :meth:`InterviewerAgent.route_to_probe`) wires them together:
+the supervisor logic that turns five questions and four probes into one
+interview that sorts a person and closes gracefully.
 
 The persona prompt — the craft this whole project's quality rests on — lives
 in ``prompts/persona.md`` and is loaded at construction time. Keeping it in a
 file (not a string literal) means it can be iterated, reviewed, and diffed as
-prose without touching code.
+prose without touching code. Routing is logic, not dialogue: the probes carry
+their own voice, continuous with the persona, so nothing here speaks.
 """
 
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Awaitable, Callable, Optional
 
 from livekit.agents import Agent
 
-from agent.state import InterviewState
+from agent.probes import (
+    ArcProbeTask,
+    CompassProbeTask,
+    IcebergProbeTask,
+    TwoButtonsProbeTask,
+)
+from agent.state import (
+    TEMPLATE_SIGNALS,
+    ArcResult,
+    CompassResult,
+    IcebergResult,
+    InterviewState,
+    TwoButtonsResult,
+)
 
 logger = logging.getLogger("sorting-hat.interviewer")
 
@@ -74,6 +94,134 @@ def load_persona() -> str:
 
 
 # ---------------------------------------------------------------------------
+# Supervisor routing — probe invocation, thin detection, pivoting
+# ---------------------------------------------------------------------------
+
+# The four template labels, in the fixed fallback order the supervisor walks
+# when there is no signal to lead on (every weight still at 0.0). Order matches
+# TEMPLATE_SIGNALS so it is the same tie-break order leading_template() uses.
+TEMPLATE_ORDER: tuple[str, ...] = tuple(TEMPLATE_SIGNALS.values())
+
+# How many probes the supervisor will run before it stops pivoting and closes
+# with the best result it has. Capped well below the four templates so a run
+# of thin probes cannot loop through every shape endlessly — after this many
+# attempts the interview closes regardless. Three attempts means: lead probe,
+# then up to two pivots.
+MAX_PROBE_ATTEMPTS: int = 3
+
+# Map each template label to the InterviewState field its typed result lands
+# on, so the supervisor can store whichever probe came back full.
+_RESULT_FIELD: dict[str, str] = {
+    "iceberg": "iceberg_result",
+    "two_buttons": "two_buttons_result",
+    "compass": "compass_result",
+    "arc": "arc_result",
+}
+
+
+@dataclass
+class ProbeOutcome:
+    """What running one probe sub-interview produced.
+
+    A probe returns its locked typed result (an :class:`IcebergResult`,
+    :class:`TwoButtonsResult`, :class:`CompassResult` or :class:`ArcResult`)
+    plus a ``thin`` flag the supervisor reads to decide whether to trust the
+    portrait or pivot. The four probes each signal thinness differently — one
+    flag here normalises that for the routing logic.
+
+    Attributes:
+        template: The short template label this probe deepened into.
+        result: The probe's typed result. Always a valid, fully typed model,
+            even on a thin run (a thin run records honest deflection notes
+            rather than fabricated depth).
+        thin: True when the probe did not land — the person did not resolve
+            into this shape. A thin outcome triggers a pivot.
+    """
+
+    template: str
+    result: object
+    thin: bool
+
+
+# A ProbeRunner runs one probe sub-interview to completion and returns its
+# outcome. The default runners (below) await the real LiveKit AgentTask; tests
+# inject fakes so routing can be proven with no live LLM and no session.
+ProbeRunner = Callable[[], Awaitable[ProbeOutcome]]
+
+
+async def _run_iceberg() -> ProbeOutcome:
+    """Default runner for the Iceberg probe — awaits the real ``AgentTask``.
+
+    The probe is awaited inside the supervisor's session (LiveKit v1.5.9:
+    ``result = await IcebergProbeTask()``). The Iceberg probe carries its
+    thin signal in the layer text rather than on the typed result, so
+    :func:`_iceberg_is_thin` reads it back off the completed task/result.
+    """
+    task = IcebergProbeTask()
+    result: IcebergResult = await task
+    return ProbeOutcome("iceberg", result, _probe_thin(task))
+
+
+async def _run_two_buttons() -> ProbeOutcome:
+    """Default runner for the Two Buttons probe — awaits the real ``AgentTask``.
+
+    The Two Buttons probe sets ``tension_is_real`` on the task when it
+    records; a false value is the thin signal.
+    """
+    task = TwoButtonsProbeTask()
+    result: TwoButtonsResult = await task
+    return ProbeOutcome("two_buttons", result, _probe_thin(task))
+
+
+async def _run_compass() -> ProbeOutcome:
+    """Default runner for the Compass probe — awaits the real ``AgentTask``."""
+    task = CompassProbeTask()
+    result: CompassResult = await task
+    return ProbeOutcome("compass", result, _probe_thin(task))
+
+
+async def _run_arc() -> ProbeOutcome:
+    """Default runner for the Arc probe — awaits the real ``AgentTask``."""
+    task = ArcProbeTask()
+    result: ArcResult = await task
+    return ProbeOutcome("arc", result, _probe_thin(task))
+
+
+def _probe_thin(task: object) -> bool:
+    """Read a completed probe task's thin signal, normalised to a bool.
+
+    The four probes were each built in isolation (G4–G7) and signal a thin
+    result differently — Two Buttons sets ``tension_is_real`` on the task,
+    others may set a ``thin``/``thin_result`` attribute. Routing must not
+    change the probes, so it reads whatever signal is present defensively and
+    treats a missing signal as *not thin* (a full result). The supervisor's
+    pivot cap is the backstop if a probe never signals at all.
+    """
+    # Two Buttons: tension_is_real is the inverse of thin.
+    tension_is_real = getattr(task, "tension_is_real", None)
+    if tension_is_real is not None:
+        return not bool(tension_is_real)
+    # Iceberg / Compass / Arc: a thin flag set on the task, if any.
+    for attr in ("thin", "thin_result", "thread_came_back_thin"):
+        value = getattr(task, attr, None)
+        if value is not None:
+            return bool(value)
+    # No signal exposed — treat as a full result; the pivot cap is the guard.
+    return False
+
+
+# The default probe registry: template label -> runner awaiting the real
+# AgentTask. The supervisor looks runners up here; a test passes its own
+# registry of fakes to InterviewerAgent so routing runs with no LLM.
+DEFAULT_PROBE_RUNNERS: dict[str, ProbeRunner] = {
+    "iceberg": _run_iceberg,
+    "two_buttons": _run_two_buttons,
+    "compass": _run_compass,
+    "arc": _run_arc,
+}
+
+
+# ---------------------------------------------------------------------------
 # InterviewerAgent
 # ---------------------------------------------------------------------------
 
@@ -93,15 +241,31 @@ class InterviewerAgent(Agent):
     live worker it is the session's typed ``userdata``.
     """
 
-    def __init__(self, state: InterviewState | None = None) -> None:
+    def __init__(
+        self,
+        state: InterviewState | None = None,
+        probe_runners: dict[str, ProbeRunner] | None = None,
+    ) -> None:
         """Build the interviewer with the persona prompt as its instructions.
 
         ``state`` is the shared interview state. When omitted a fresh
         :class:`InterviewState` is created — convenient for tests and for a
         worker that constructs the agent before wiring ``userdata``.
+
+        ``probe_runners`` maps each template label to the coroutine the
+        supervisor awaits to run that probe. It defaults to
+        :data:`DEFAULT_PROBE_RUNNERS`, which await the real LiveKit
+        ``AgentTask`` probes. A test passes its own registry of fakes so the
+        routing logic can be proven with no live LLM and no session.
         """
         super().__init__(instructions=load_persona())
         self._state: InterviewState = state if state is not None else InterviewState()
+        self._probe_runners: dict[str, ProbeRunner] = (
+            dict(probe_runners) if probe_runners is not None else dict(DEFAULT_PROBE_RUNNERS)
+        )
+        # Templates whose probe has already been run this interview — so a
+        # pivot never re-runs a shape the supervisor already tried.
+        self._probes_attempted: list[str] = []
 
     # --- Shared state ------------------------------------------------------
 
@@ -155,11 +319,160 @@ class InterviewerAgent(Agent):
             BASE_QUESTION_COUNT,
         )
 
-        # TODO(G8): supervisor routing hook. Once all base questions are
-        # complete, G8 wires this point to read InterviewState signal weights
-        # (state.leading_template()), invoke the winning probe AgentTask, and
-        # set state.chosen_template. G3 stops at the base interview and the
-        # warm close — no probe delegation here yet.
+    # --- Supervisor routing (G8) ------------------------------------------
+
+    @property
+    def probes_attempted(self) -> tuple[str, ...]:
+        """Template labels whose probe has been run this interview, in order."""
+        return tuple(self._probes_attempted)
+
+    @property
+    def routing_done(self) -> bool:
+        """True once routing has settled — a probe has landed, or the cap hit.
+
+        Routing is done when :attr:`InterviewState.chosen_template` is set (a
+        probe came back full) or the supervisor has exhausted its probe
+        attempts. Either way, the interview can close.
+        """
+        return (
+            self._state.chosen_template is not None
+            or len(self._probes_attempted) >= MAX_PROBE_ATTEMPTS
+        )
+
+    def _next_probe_template(self) -> Optional[str]:
+        """Pick the next probe to run: the highest-signal template not yet tried.
+
+        Uses :meth:`InterviewState.leading_template` for the signal-ranked
+        choice, walking down the signal weights to skip any template already
+        attempted. When every signal is still at 0.0 — no evidence to lead on
+        — it falls back to the fixed :data:`TEMPLATE_ORDER` so routing still
+        makes a deterministic, defensible choice rather than stalling.
+
+        Returns the chosen template label, or ``None`` when all four have
+        already been attempted.
+        """
+        # Signal-ranked: sort the four weights high-to-low, take the first
+        # template not yet tried. Ties fall back to TEMPLATE_SIGNALS order
+        # (Python's sort is stable and signal_weights() preserves that order).
+        weights = self._state.signal_weights()
+        ranked = sorted(weights.items(), key=lambda kv: kv[1], reverse=True)
+        for label, weight in ranked:
+            if weight > 0.0 and label not in self._probes_attempted:
+                return label
+
+        # No signal (or every signalled template already tried): walk the
+        # fixed fallback order for the first untried template.
+        for label in TEMPLATE_ORDER:
+            if label not in self._probes_attempted:
+                return label
+
+        # All four templates have been attempted.
+        return None
+
+    def _store_full_result(self, outcome: ProbeOutcome) -> None:
+        """Record a full (non-thin) probe outcome as the interview's verdict.
+
+        Sets :attr:`InterviewState.chosen_template` to the probe's template
+        and writes its typed result onto the matching ``*_result`` field.
+        This is the sort landing — after this the interview closes.
+        """
+        self._state.chosen_template = outcome.template
+        field = _RESULT_FIELD[outcome.template]
+        setattr(self._state, field, outcome.result)
+        logger.info(
+            "probe '%s' landed — chosen_template set, %s populated",
+            outcome.template,
+            field,
+        )
+
+    async def route_to_probe(self) -> Optional[ProbeOutcome]:
+        """Supervisor routing — invoke probes after the base interview.
+
+        This is the brief's step 4 and the G8 outcome. Called once the five
+        base questions are complete, it:
+
+        1. reads the accumulated signal weights via
+           :meth:`InterviewState.leading_template` (with a deterministic
+           fallback when there is no signal yet);
+        2. runs the matching probe sub-interview, awaiting its typed result;
+        3. inspects the result — a **full** result is the sort: it sets
+           ``chosen_template`` and the matching result field, and routing
+           ends; a **thin** result is recorded and the supervisor *pivots*
+           to the next-highest-signal probe not yet tried;
+        4. caps the number of probes at :data:`MAX_PROBE_ATTEMPTS` so a run
+           of thin probes cannot loop through every shape endlessly — after
+           the cap the interview closes with the best result it has.
+
+        Routing is logic, not dialogue: each probe carries its own voice,
+        continuous with the persona, so this method itself never speaks.
+
+        Returns the :class:`ProbeOutcome` the interview settled on — the full
+        result if one landed, otherwise the last thin outcome seen (or
+        ``None`` if no probe ran at all). The authoritative verdict is always
+        on :class:`InterviewState`.
+        """
+        if not self.base_questions_done:
+            logger.warning(
+                "route_to_probe() called before the base interview is "
+                "complete (%d/%d) — ignoring",
+                self.base_questions_completed,
+                BASE_QUESTION_COUNT,
+            )
+            return None
+
+        last_outcome: Optional[ProbeOutcome] = None
+
+        while len(self._probes_attempted) < MAX_PROBE_ATTEMPTS:
+            template = self._next_probe_template()
+            if template is None:
+                # Every template has been attempted; nothing left to pivot to.
+                logger.info("supervisor: all probes attempted, closing")
+                break
+
+            runner = self._probe_runners.get(template)
+            if runner is None:
+                # No runner registered for this template — skip it rather than
+                # stall. Mark it attempted so the loop makes progress.
+                logger.warning(
+                    "supervisor: no probe runner for '%s' — skipping", template
+                )
+                self._probes_attempted.append(template)
+                continue
+
+            attempt = len(self._probes_attempted) + 1
+            logger.info(
+                "supervisor: probe attempt %d/%d -> '%s'",
+                attempt,
+                MAX_PROBE_ATTEMPTS,
+                template,
+            )
+            outcome = await runner()
+            self._probes_attempted.append(template)
+            last_outcome = outcome
+
+            if not outcome.thin:
+                # A full result — the sort lands here. Record it and close.
+                self._store_full_result(outcome)
+                return outcome
+
+            # Thin: the probe did not land. Record nothing as the verdict and
+            # pivot to the next-strongest untried probe.
+            logger.info(
+                "supervisor: probe '%s' came back thin — pivoting", template
+            )
+
+        # The cap was reached (or all templates were exhausted) with no full
+        # result. The interview closes with the best result it has — the last
+        # thin outcome — rather than looping forever.
+        if last_outcome is not None and self._state.chosen_template is None:
+            logger.info(
+                "supervisor: probe cap reached after %d thin probe(s) — "
+                "closing with the best result from '%s'",
+                len(self._probes_attempted),
+                last_outcome.template,
+            )
+            self._store_full_result(last_outcome)
+        return last_outcome
 
 
 __all__ = [
@@ -167,4 +480,9 @@ __all__ = [
     "BASE_QUESTIONS",
     "BASE_QUESTION_COUNT",
     "load_persona",
+    "ProbeOutcome",
+    "ProbeRunner",
+    "DEFAULT_PROBE_RUNNERS",
+    "MAX_PROBE_ATTEMPTS",
+    "TEMPLATE_ORDER",
 ]
