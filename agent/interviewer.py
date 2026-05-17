@@ -21,6 +21,7 @@ their own voice, continuous with the persona, so nothing here speaks.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from dataclasses import dataclass
 from pathlib import Path
@@ -28,6 +29,7 @@ from typing import Awaitable, Callable, Optional
 
 from livekit.agents import Agent
 
+from agent.classifier import apply_scores, classify_turn
 from agent.probes import (
     ArcProbeTask,
     CompassProbeTask,
@@ -266,6 +268,12 @@ class InterviewerAgent(Agent):
         # Templates whose probe has already been run this interview — so a
         # pivot never re-runs a shape the supervisor already tried.
         self._probes_attempted: list[str] = []
+        # In-flight background classifier tasks (G14). The classifier runs as
+        # a parallel observer fired on each user turn — never awaited on the
+        # critical path — so the agent holds references here both to keep the
+        # tasks from being garbage-collected mid-run and to cancel/await any
+        # still pending when the session closes. See on_user_turn().
+        self._classifier_tasks: set[asyncio.Task] = set()
 
     # --- Shared state ------------------------------------------------------
 
@@ -318,6 +326,116 @@ class InterviewerAgent(Agent):
             self._state.base_questions_completed,
             BASE_QUESTION_COUNT,
         )
+
+    # --- Background classifier (G14, observer pattern) --------------------
+
+    @property
+    def classifier_tasks(self) -> tuple[asyncio.Task, ...]:
+        """The background classifier tasks currently tracked, in no order.
+
+        Exposed for the live worker's shutdown path and for tests asserting
+        an observer task was actually fired.
+        """
+        return tuple(self._classifier_tasks)
+
+    def on_user_turn(self, user_response: str) -> Optional[asyncio.Task]:
+        """Observer hook: fire the background classifier for one user turn.
+
+        This is the brief's step 6 — LiveKit's observer pattern. Called
+        once per completed user turn (in the live worker, off the session's
+        ``user_input_transcribed`` final-transcript event). It fires
+        :func:`~agent.classifier.classify_turn` as a background
+        ``asyncio.create_task`` and returns **immediately** — the classifier
+        is NOT awaited here, so it never blocks the next agent turn.
+
+        When the task later resolves, :meth:`_absorb_classifier_result`
+        accumulates its scores into the shared :class:`InterviewState`
+        signal weights, so the supervisor's later
+        :meth:`InterviewState.leading_template` read reflects evidence
+        gathered across every turn.
+
+        The task is tracked in :attr:`classifier_tasks` (so it is not
+        garbage-collected mid-run and can be cleaned up at session close)
+        and its result is absorbed via a done-callback that cannot raise
+        into the session. An empty/whitespace response is a no-op — no task
+        is fired — and ``None`` is returned.
+
+        Returns the created :class:`asyncio.Task`, or ``None`` when no task
+        was fired (empty input, or no running event loop).
+        """
+        if not user_response or not user_response.strip():
+            return None
+
+        try:
+            task = asyncio.ensure_future(classify_turn(user_response))
+        except RuntimeError:
+            # No running event loop — nothing to fire onto. The interview
+            # simply runs without mid-interview signal nudges; the supervisor
+            # falls back to its deterministic template order.
+            logger.warning(
+                "on_user_turn() called with no running event loop — "
+                "skipping the background classifier for this turn"
+            )
+            return None
+
+        self._classifier_tasks.add(task)
+        task.add_done_callback(self._on_classifier_done)
+        logger.debug(
+            "background classifier fired for a user turn (%d in flight)",
+            len(self._classifier_tasks),
+        )
+        return task
+
+    def _on_classifier_done(self, task: asyncio.Task) -> None:
+        """Done-callback for a background classifier task — never raises.
+
+        Runs when a :func:`~agent.classifier.classify_turn` task completes
+        (resolved, failed, or cancelled). It drops the task from the
+        tracking set and, on a normal result, absorbs the scores into the
+        interview state. Any exception the task carried is logged and
+        swallowed here so a failed classifier can never crash the session —
+        :func:`classify_turn` is already built not to raise, but this is the
+        belt-and-braces guard the observer pattern requires.
+        """
+        self._classifier_tasks.discard(task)
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is not None:
+            logger.warning(
+                "background classifier task ended with an exception — "
+                "ignoring (signal weights unchanged)",
+                exc_info=exc,
+            )
+            return
+        self._absorb_classifier_result(task.result())
+
+    def _absorb_classifier_result(self, scores: object) -> None:
+        """Accumulate one classifier result into the interview signal weights.
+
+        Delegates to :func:`agent.classifier.apply_scores`, which adds the
+        four scores onto the matching ``*_signal`` fields of the shared
+        :class:`InterviewState`. No-op (all-zero) scores leave the weights
+        untouched. ``apply_scores`` never raises; this wrapper exists only
+        to keep the absorb step a single named, testable seam.
+        """
+        apply_scores(self._state, scores)  # type: ignore[arg-type]
+
+    async def aclose_classifiers(self) -> None:
+        """Cancel and drain any in-flight background classifier tasks.
+
+        Called from the live worker's session-shutdown path so a classifier
+        task still waiting on a slow LLM hop does not outlive the interview.
+        Each pending task is cancelled and awaited; exceptions are
+        suppressed — shutdown must be quiet. Safe to call with no tasks
+        in flight.
+        """
+        pending = [t for t in self._classifier_tasks if not t.done()]
+        for task in pending:
+            task.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+        self._classifier_tasks.clear()
 
     # --- Supervisor routing (G8) ------------------------------------------
 
@@ -485,4 +603,6 @@ __all__ = [
     "DEFAULT_PROBE_RUNNERS",
     "MAX_PROBE_ATTEMPTS",
     "TEMPLATE_ORDER",
+    "classify_turn",
+    "apply_scores",
 ]
