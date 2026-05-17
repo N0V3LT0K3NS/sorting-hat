@@ -78,6 +78,23 @@ Every dispatched goal's completion condition ends with:
 - **Proving command:** `uv run pytest tests/test_interviewer.py -v`
 - **Completion:** proving command exits 0; HERMES review notes addressed.
 
+### G3.1 · Persona craft fix — add the CROSS move — `PENDING` · CC
+- **Context:** The G3 adversarial review found the DRILL IN / ZOOM OUT
+  binary is not exhaustive. It omits the **CROSS / lateral move** (pit one
+  thing against another, ask the negative case, ask the source) — and
+  CROSS is exactly how the tension and position shapes get elicited. The
+  DRIFT CHECK currently tells the agent to treat a non-drill/non-zoom
+  follow-up as noise, which structurally suppresses half the template
+  space. Must be fixed before the G4–G7 probe swarm inherits the flaw.
+- **Outcome:** `prompts/persona.md` and `docs/borrowed-craft.md` updated:
+  add CROSS as a third follow-up move with worked examples; fix the DRIFT
+  CHECK so a clean CROSS is not flagged as noise; remove the "usually
+  drill in before zoom out" default (the prompt already half-contradicts
+  it). `tests/test_interviewer.py` gains a test asserting CROSS is present.
+- **In-scope:** `prompts/persona.md`, `docs/borrowed-craft.md`,
+  `tests/test_interviewer.py`.
+- **Proving command:** `uv run pytest tests/test_interviewer.py -v`
+
 ### G4 · Iceberg probe `AgentTask` — `PENDING` · CC + HERMES
 ### G5 · Two-Buttons probe `AgentTask` — `PENDING` · CC + HERMES
 ### G6 · Compass probe `AgentTask` — `PENDING` · CC + HERMES
@@ -182,6 +199,20 @@ Every dispatched goal's completion condition ends with:
   review of the resulting transcripts and portraits.
 - **Completion:** 10 sessions complete kiosk-to-PNG; portraits judged
   uncomfortably accurate, not horoscope-generic.
+- **Tuning backlog (from the G3 adversarial review — fix against live
+  transcripts, not before):**
+  1. Define "something real" structurally — a thread is done when its
+     answer is structurally legible, not merely emotionally vivid.
+  2. Add a "difficult registers" section: one concrete tactic each for
+     the evasive / one-word / rambling / performative / emotional
+     interviewee. The persona currently only offers a vibe.
+  3. The closing is a subtle blind-sort leak — five probing questions then
+     a pointed no-reflection exit feels extractive. Give one genuine
+     non-diagnostic human reaction back at the close.
+  4. Add 2–3 prepared deflections for pointed meta-questions ("are you an
+     AI?", "is this a personality test?").
+  5. Add a hard per-thread turn cap (~4) so a thread that never lands
+     cannot loop forever.
 
 ---
 
