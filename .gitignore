@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.pytest_cache/
+.ruff_cache/
+
+# Environment / secrets
+.env
+.env.local
+*.local
+
+# uv
+.uv/
+
+# Node / kiosk frontend
+node_modules/
+.next/
+out/
+dist/
+
+# Session output (transcripts, generated portraits)
+sessions/
+*.png
+!assets/templates/*.png
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
