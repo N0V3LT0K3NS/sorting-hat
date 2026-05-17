@@ -1,0 +1,27 @@
+{
+  "name": "sorting-hat-kiosk",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Minimal fullscreen kiosk frontend for the sorting-hat voice interview.",
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "next lint"
+  },
+  "dependencies": {
+    "@livekit/components-react": "^2.9.0",
+    "@livekit/components-styles": "^1.1.4",
+    "livekit-client": "^2.9.0",
+    "livekit-server-sdk": "^2.9.0",
+    "next": "^15.5.4",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "typescript": "^5.7.0"
+  }
+}

@@ -1,0 +1,239 @@
+/* Screen layout + the three-screen transitions for the kiosk. */
+
+.stage {
+  position: relative;
+  height: 100%;
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--bg);
+}
+
+/* Each screen fades in over the last; absolutely stacked. */
+.screen {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2.5rem;
+  padding: 4rem;
+  text-align: center;
+  animation: fadeIn 700ms ease both;
+}
+
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* --- Idle screen --- */
+
+.prompt {
+  font-size: clamp(2rem, 5vw, 3.75rem);
+  font-weight: 300;
+  letter-spacing: -0.01em;
+  line-height: 1.25;
+  max-width: 18ch;
+}
+
+.subPrompt {
+  font-size: clamp(1.5rem, 3.5vw, 2.5rem);
+  font-weight: 300;
+  color: var(--fg-dim);
+}
+
+.beginButton {
+  margin-top: 1rem;
+  font-size: clamp(1.25rem, 2.6vw, 1.75rem);
+  font-weight: 400;
+  letter-spacing: 0.04em;
+  color: var(--bg);
+  background: var(--accent);
+  border: none;
+  border-radius: 999px;
+  padding: 1.25rem 3.5rem;
+  cursor: pointer;
+  transition:
+    transform 200ms ease,
+    box-shadow 300ms ease,
+    background 200ms ease;
+  box-shadow: 0 0 0 0 var(--accent-dim);
+  /* A slow breathing glow so the idle screen feels alive, not dead. */
+  animation: breathe 4s ease-in-out infinite;
+}
+
+.beginButton:hover {
+  transform: scale(1.03);
+}
+
+.beginButton:active {
+  transform: scale(0.98);
+}
+
+.beginButton:disabled {
+  cursor: progress;
+  opacity: 0.6;
+  animation: none;
+}
+
+@keyframes breathe {
+  0%,
+  100% {
+    box-shadow: 0 0 36px 2px var(--accent-dim);
+  }
+  50% {
+    box-shadow: 0 0 64px 10px var(--accent-dim);
+  }
+}
+
+/* --- Active screen --- */
+
+.visualizer {
+  width: min(560px, 70vw);
+  height: 220px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* BarVisualizer bars, themed to the accent color. */
+.visualizer :global(.lk-audio-bar) {
+  background: var(--accent-dim);
+}
+.visualizer :global(.lk-audio-bar.lk-highlighted) {
+  background: var(--accent);
+}
+
+.stateLabel {
+  font-size: clamp(1.1rem, 2.4vw, 1.6rem);
+  font-weight: 300;
+  letter-spacing: 0.05em;
+  color: var(--fg-dim);
+  min-height: 1.6em;
+  transition: color 400ms ease;
+}
+
+.stateLabel[data-speaking="true"] {
+  color: var(--accent);
+}
+
+/* A subtle pulsing dot — the "subtle speaking indicator". */
+.speakingDot {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--accent-dim);
+  transition: background 300ms ease;
+}
+
+.speakingDot[data-speaking="true"] {
+  background: var(--accent);
+  animation: pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes pulse {
+  0%,
+  100% {
+    transform: scale(1);
+    opacity: 0.7;
+  }
+  50% {
+    transform: scale(1.5);
+    opacity: 1;
+  }
+}
+
+/* --- Complete screen --- */
+
+.completeMark {
+  width: 64px;
+  height: 64px;
+  border-radius: 50%;
+  border: 2px solid var(--accent);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  animation: settle 900ms ease both;
+}
+
+.completeMark::after {
+  content: "";
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--accent);
+}
+
+@keyframes settle {
+  from {
+    transform: scale(0.6);
+    opacity: 0;
+  }
+  to {
+    transform: scale(1);
+    opacity: 1;
+  }
+}
+
+/* --- Error notice (calm, non-fatal) --- */
+
+.error {
+  margin-top: 1.5rem;
+  max-width: 26ch;
+  font-size: clamp(0.95rem, 1.8vw, 1.15rem);
+  font-weight: 300;
+  line-height: 1.5;
+  color: var(--error);
+}
+
+/* --- Hidden dev transcript toggle --- */
+
+.devToggle {
+  position: absolute;
+  bottom: 0.75rem;
+  right: 0.75rem;
+  width: 16px;
+  height: 16px;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  opacity: 0; /* invisible by default — a corner hotspot for devs */
+}
+
+.devToggle:focus-visible {
+  opacity: 1;
+  outline: 1px solid var(--fg-dim);
+}
+
+.transcript {
+  position: absolute;
+  bottom: 1.5rem;
+  left: 1.5rem;
+  right: 1.5rem;
+  max-height: 30vh;
+  overflow-y: auto;
+  font-size: 0.85rem;
+  font-weight: 300;
+  line-height: 1.5;
+  color: var(--fg-dim);
+  text-align: left;
+  border-top: 1px solid #1a1a1a;
+  padding-top: 0.75rem;
+}
+
+.transcriptLine {
+  margin-bottom: 0.35rem;
+}
+
+.transcriptLine[data-from="agent"] {
+  color: var(--fg);
+}
