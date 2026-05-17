@@ -9,7 +9,8 @@ One probe per locked template: Iceberg (depth), Two Buttons (tension),
 Compass (position), Arc (trajectory).
 """
 
+from agent.probes.compass import CompassProbeTask
 from agent.probes.iceberg import IcebergProbeTask
 from agent.probes.two_buttons import TwoButtonsProbeTask
 
-__all__ = ["IcebergProbeTask", "TwoButtonsProbeTask"]
+__all__ = ["IcebergProbeTask", "TwoButtonsProbeTask", "CompassProbeTask"]
