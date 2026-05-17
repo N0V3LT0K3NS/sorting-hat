@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   BarVisualizer,
   RoomAudioRenderer,
@@ -11,17 +11,23 @@ import { ConnectionState } from "livekit-client";
 import styles from "../app/kiosk.module.css";
 
 /**
- * Screen 2 — Active. Rendered inside a <LiveKitRoom>. Shows the agent's
- * waveform via BarVisualizer and a subtle speaking indicator. No transcript
+ * Screen 2 — Active. Rendered inside a `<LiveKitRoom>`. Shows the agent's
+ * waveform via `BarVisualizer` and a subtle speaking indicator. No transcript
  * by default — seeing one's own words changes the dynamic of the interview.
  * A hidden corner toggle reveals a dev transcript view.
  *
- * Calls `onComplete` when the room disconnects (the agent ends the session).
+ * Calls `onComplete` when the room disconnects (the agent ends the session)
+ * or when the agent worker never joins within a grace period — a kiosk must
+ * never strand a visitor on a frozen "Connecting…" screen.
  */
 export function ActiveScreen({ onComplete }: { onComplete: () => void }) {
   const { state, audioTrack, agentTranscriptions } = useVoiceAssistant();
   const connectionState = useConnectionState();
   const [showTranscript, setShowTranscript] = useState(false);
+  // True once we have given up waiting for the agent worker to appear.
+  const [agentTimedOut, setAgentTimedOut] = useState(false);
+  // Whether the agent has been observed in the room at least once.
+  const agentSeen = useRef(false);
 
   // When the room disconnects, the interview is over -> Complete screen.
   useEffect(() => {
@@ -29,6 +35,27 @@ export function ActiveScreen({ onComplete }: { onComplete: () => void }) {
       onComplete();
     }
   }, [connectionState, onComplete]);
+
+  // Note when the agent first becomes active — any non-disconnected voice
+  // state means the worker has joined and the session is genuinely live.
+  useEffect(() => {
+    if (state && state !== "disconnected" && state !== "connecting") {
+      agentSeen.current = true;
+    }
+  }, [state]);
+
+  // Agent-join watchdog: if the worker is not dispatched into the room
+  // within the grace period, end the session calmly instead of hanging.
+  useEffect(() => {
+    const t = setTimeout(() => {
+      if (!agentSeen.current) setAgentTimedOut(true);
+    }, AGENT_JOIN_TIMEOUT_MS);
+    return () => clearTimeout(t);
+  }, []);
+
+  useEffect(() => {
+    if (agentTimedOut) onComplete();
+  }, [agentTimedOut, onComplete]);
 
   const speaking = state === "speaking";
   const label = stateLabel(state, connectionState);
@@ -83,6 +110,13 @@ export function ActiveScreen({ onComplete }: { onComplete: () => void }) {
     </div>
   );
 }
+
+/**
+ * How long to wait for the Python agent worker to join the room before
+ * giving up. Generous — worker cold-start plus model warm-up can take a
+ * few seconds — but bounded, so a misconfigured deployment fails visibly.
+ */
+const AGENT_JOIN_TIMEOUT_MS = 30_000;
 
 /** A calm, human-readable label for the current voice-assistant state. */
 function stateLabel(
