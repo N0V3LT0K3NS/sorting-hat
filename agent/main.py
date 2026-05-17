@@ -57,6 +57,8 @@ from livekit.plugins import openai, silero
 from livekit.plugins.turn_detector.english import EnglishModel
 
 from agent.config import Config, load_config
+from agent.interviewer import InterviewerAgent
+from agent.state import InterviewState
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("sorting-hat.agent")
@@ -92,6 +94,7 @@ class SessionParts:
     agent: Agent
     llm: openai.LLM
     vad: silero.VAD
+    state: InterviewState
 
 
 def build_llm(cfg: Config) -> openai.LLM:
@@ -156,11 +159,22 @@ def build_session(cfg: Config) -> SessionParts:
         api_secret=livekit_secret,
     )
 
+    # The interview's shared state. It is the session's typed ``userdata`` so
+    # the InterviewerAgent supervisor (G8) and the four probe AgentTasks all
+    # read and write the same InterviewState — signal weights, base-question
+    # progress, the chosen template, and the typed probe results.
+    state = InterviewState()
+
     session: AgentSession = AgentSession(
         stt=stt,
         tts=tts,
         llm=llm,
         vad=vad,
+        # Typed shared state for the whole interview. The InterviewerAgent
+        # reads its routing inputs (signal weights) and writes its verdict
+        # (chosen_template + result) here; probe tasks run inside this session
+        # and share the same userdata.
+        userdata=state,
         # turn_handling bundles three behaviours for G2:
         #  * preemptive_generation — draft the reply before the user's turn is
         #    fully confirmed, then commit it the instant the turn ends.
@@ -175,7 +189,7 @@ def build_session(cfg: Config) -> SessionParts:
 
     agent = Agent(instructions=SKELETON_INSTRUCTIONS)
 
-    return SessionParts(session=session, agent=agent, llm=llm, vad=vad)
+    return SessionParts(session=session, agent=agent, llm=llm, vad=vad, state=state)
 
 
 # ---------------------------------------------------------------------------
@@ -235,14 +249,18 @@ async def entrypoint(ctx: JobContext) -> None:
 
     parts = build_session(cfg)
 
-    # Native turn detector — the transformer end-of-utterance model. It needs
-    # the worker's inference executor, so it is created here, inside the job
-    # context. AgentSession.turn_detection is read-only, so the detector is
-    # attached to the Agent (which the session reads at start()).
-    agent = Agent(
-        instructions=SKELETON_INSTRUCTIONS,
-        turn_detection=EnglishModel(),
-    )
+    # The InterviewerAgent is the supervisor: it owns the five base questions
+    # and, once they are done, routes into the probe sub-interviews (G8). It
+    # is wired to the same InterviewState that backs the session's userdata,
+    # so its routing reads the signal weights the background classifier nudges
+    # and writes its verdict where the offline pipeline can read it.
+    #
+    # The native transformer end-of-utterance turn detector needs the worker's
+    # inference executor, so it is constructed here, inside the job context;
+    # AgentSession.turn_detection is read-only, so the detector rides on the
+    # Agent (which the session reads at start()).
+    agent = InterviewerAgent(state=parts.state)
+    agent.turn_detection = EnglishModel()
 
     instrument_latency(parts.session)
 
