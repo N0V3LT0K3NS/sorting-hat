@@ -1,0 +1,51 @@
+/* sorting-hat kiosk — minimal, black, one accent color, large type. */
+
+:root {
+  --bg: #000000;
+  --fg: #f4f1ea; /* warm off-white, easier on the eye than pure white */
+  --fg-dim: #6b6862;
+  --accent: #e8b04b; /* a single warm amber accent */
+  --accent-dim: #7a5e2a;
+  --error: #c96a4f;
+}
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html,
+body {
+  height: 100%;
+  background: var(--bg);
+  color: var(--fg);
+  font-family:
+    ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica,
+    Arial, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  overflow: hidden; /* fullscreen kiosk — no scroll */
+}
+
+body {
+  /* Prevent accidental text selection / long-press menus on a touch kiosk. */
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-tap-highlight-color: transparent;
+  cursor: default;
+}
+
+#__next,
+main {
+  height: 100%;
+}
+
+/* Respect reduced-motion: the calm pulse and fades are decorative. */
+@media (prefers-reduced-motion: reduce) {
+  * {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
