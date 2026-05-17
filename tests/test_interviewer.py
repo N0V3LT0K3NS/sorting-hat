@@ -94,6 +94,65 @@ def test_persona_encodes_drift_check() -> None:
     assert "drift check" in load_persona().lower()
 
 
+def test_persona_encodes_cross_follow_up_move() -> None:
+    """The CROSS move is a named third follow-up option in persona.md.
+
+    G3.1: the DRILL IN / ZOOM OUT binary is not exhaustive. CROSS — the
+    lateral move (pit one thing against another, the negative case, the
+    source) — must be present by name and as part of the follow-up rule.
+    """
+    persona = load_persona()
+    assert "CROSS" in persona, "persona.md must name the CROSS follow-up move"
+    # The follow-up rule heading must cover all three moves, not two.
+    low = persona.lower()
+    assert "drill in, zoom out, or cross" in low, (
+        "the follow-up rule heading must list all three moves"
+    )
+    # CROSS is described as one of three things a follow-up does.
+    assert "of three things" in low, (
+        "the follow-up rule must say a follow-up does one of THREE things"
+    )
+
+
+def test_persona_drift_check_references_three_moves_not_two() -> None:
+    """The DRIFT CHECK treats CROSS as a valid move, not as noise.
+
+    G3.1: the old DRIFT CHECK flagged any non-drill/non-zoom follow-up as
+    'probably noise'. It must now check for a clean DRILL IN, ZOOM OUT, OR
+    CROSS, and only call it noise if it is none of the three.
+    """
+    persona = load_persona()
+    low = persona.lower()
+    # Locate the DRIFT CHECK section and inspect only its text.
+    start = low.index("## drift check")
+    end = low.index("\n## ", start + 1)
+    drift = persona[start:end]
+    drift_low = drift.lower()
+    # All three moves must be named inside the DRIFT CHECK.
+    assert "drill in" in drift_low
+    assert "zoom out" in drift_low
+    assert "cross" in drift_low, "DRIFT CHECK must reference the CROSS move"
+    # 'none of the three' — noise is the residual after three valid moves.
+    assert "none of the three" in drift_low, (
+        "DRIFT CHECK must treat noise as the residual of three moves, not two"
+    )
+
+
+def test_persona_drops_fixed_drill_then_zoom_default() -> None:
+    """The 'usually drill in before it zooms out' default is gone.
+
+    G3.1: a fixed order is wrong for the tension and trajectory shapes. The
+    persona must instead say the move depends on what the thread owes.
+    """
+    low = load_persona().lower()
+    assert "usually drill in before it zooms out" not in low, (
+        "the fixed drill-then-zoom default must be removed"
+    )
+    assert "what the thread still owes" in low, (
+        "persona must say the move depends on what the thread still owes"
+    )
+
+
 def test_persona_honors_blind_sort_rule() -> None:
     """The persona forbids naming any template to the user (blind sort)."""
     persona = load_persona().lower()

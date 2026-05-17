@@ -10,9 +10,9 @@ This file is a reference for whoever writes the persona and probe prompts
 
 ---
 
-## 1. The DRILL IN / ZOOM OUT rule
+## 1. The DRILL IN / ZOOM OUT / CROSS rule
 
-Every follow-up question must do one of exactly two things:
+Every follow-up question must do one of exactly three things:
 
 - **DRILL IN** — seize a thrown-away concrete detail and go closer.
   > Respondent: "We went on this walk in McCarren Park and I just felt
@@ -25,8 +25,18 @@ Every follow-up question must do one of exactly two things:
   the pattern.
   > "How rare is it for you to feel that kind of alignment with someone?"
 
+- **CROSS** — go sideways: hold what they said against a second term. Pit
+  one thing against another, ask the negative case, or ask the source.
+  > "Is that truer at work or at home?"
+  > "What's the version of you that DOESN'T do that?"
+  > "Who taught you that?"
+  > A self-description that sounds settled has not yet shown a pull or a
+  > position; a CROSS is what surfaces the tension and trajectory shapes
+  > the binary leaves invisible.
+
 This is the engine of the conditional probes. The base questions are fixed;
-the follow-ups live or die on this rule.
+the follow-ups live or die on this rule. There is no fixed order — the right
+move depends on what the thread still owes, not on a default sequence.
 
 ## 2. Banned phrasings
 
