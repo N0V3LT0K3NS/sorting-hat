@@ -3,14 +3,19 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 
-from scripts.replay_interview import DEFAULT_TRANSCRIPT_PATH, replay_transcript
+from scripts.replay_interview import replay_transcript
+
+_FIXTURE_TRANSCRIPT_PATH = (
+    Path(__file__).resolve().parent / "fixtures" / "replay_sample_transcript.json"
+)
 
 
 def test_replay_harness_advances_diagnostic_machine() -> None:
     """Stub replay should complete base questions, route, and land a result."""
     report = asyncio.run(
-        replay_transcript(DEFAULT_TRANSCRIPT_PATH, stub_classifier=True)
+        replay_transcript(_FIXTURE_TRANSCRIPT_PATH, stub_classifier=True)
     )
 
     assert report.total_turns_replayed > 0
