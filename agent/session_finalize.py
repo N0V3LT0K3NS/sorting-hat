@@ -43,6 +43,11 @@ STATE_FILENAME = "interview_state.json"
 CLASSIFICATION_FILENAME = "classification.json"
 RESULT_FILENAME = "result.json"
 
+# Pipeline-progress file. The delivery server and the kiosk both read this to
+# show a stage-by-stage reveal; run_offline_pipeline rewrites it at each stage
+# boundary. See delivery/server.py.
+STATUS_FILENAME = "status.json"
+
 
 # ---------------------------------------------------------------------------
 # Per-session folder
@@ -127,6 +132,38 @@ def persist_transcript(
 
 
 # ---------------------------------------------------------------------------
+# Pipeline-progress status file
+# ---------------------------------------------------------------------------
+
+
+def write_status(
+    session_id: str,
+    stage: str,
+    *,
+    sessions_dir: Optional[Path] = None,
+    error: Optional[str] = None,
+) -> Path:
+    """Write/overwrite ``sessions/<session_id>/status.json`` with the stage.
+
+    ``stage`` is one of ``classifying`` / ``filling`` / ``rendering`` /
+    ``delivering`` / ``done`` / ``error``. The delivery server reads this file
+    to answer ``GET /status/<session-id>`` so the kiosk can show a
+    stage-by-stage reveal during generation. A plain, idempotent rewrite — no
+    DB, no streaming infra; the kiosk just polls the file.
+
+    Returns the status.json path.
+    """
+    folder = session_dir(session_id, sessions_dir)
+    status: dict = {"session_id": str(session_id), "stage": stage, "error": error}
+    (folder / STATUS_FILENAME).write_text(
+        json.dumps(status, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    logger.debug("session %s: status -> %s", session_id, stage)
+    return folder / STATUS_FILENAME
+
+
+# ---------------------------------------------------------------------------
 # Offline pipeline (fix 3)
 # ---------------------------------------------------------------------------
 
@@ -173,11 +210,14 @@ def run_offline_pipeline(
             session_id,
         )
         summary["errors"].append("empty transcript")
+        write_status(session_id, "error", sessions_dir=sessions_dir,
+                     error="empty transcript")
         return summary
 
     transcript_xml = wrap_transcript_xml(turns)
 
     # --- Stage 1: classify --------------------------------------------------
+    write_status(session_id, "classifying", sessions_dir=sessions_dir)
     template: Optional[str] = None
     try:
         classification = classify(transcript_xml)
@@ -211,9 +251,12 @@ def run_offline_pipeline(
             "session %s: no template available — skipping fill/render/deliver",
             session_id,
         )
+        write_status(session_id, "error", sessions_dir=sessions_dir,
+                     error="no template available")
         return summary
 
     # --- Stage 2: fill ------------------------------------------------------
+    write_status(session_id, "filling", sessions_dir=sessions_dir)
     typed_result = None
     try:
         probe_result = _live_probe_result(state, template)
@@ -236,9 +279,12 @@ def run_offline_pipeline(
         logger.warning(
             "session %s: no typed result — skipping render/deliver", session_id
         )
+        write_status(session_id, "error", sessions_dir=sessions_dir,
+                     error="no typed result")
         return summary
 
     # --- Stage 3: render ----------------------------------------------------
+    write_status(session_id, "rendering", sessions_dir=sessions_dir)
     portrait_path = folder / "portrait.png"
     try:
         render(typed_result, portrait_path)
@@ -251,12 +297,15 @@ def run_offline_pipeline(
             exc,
         )
         summary["errors"].append(f"render: {exc}")
+        write_status(session_id, "error", sessions_dir=sessions_dir,
+                     error=f"render: {exc}")
         return summary
 
     # --- Stage 4: deliver ---------------------------------------------------
     # The transcript + state JSON are already in this folder from
     # persist_transcript(); deliver writes into the same folder, so they are
     # NOT passed as artifacts (that would copy a file onto itself).
+    write_status(session_id, "delivering", sessions_dir=sessions_dir)
     try:
         delivery = deliver(portrait_path, session_id)
         summary["delivered"] = True
@@ -267,7 +316,11 @@ def run_offline_pipeline(
             "session %s: deliver stage failed (%s)", session_id, exc
         )
         summary["errors"].append(f"deliver: {exc}")
+        write_status(session_id, "error", sessions_dir=sessions_dir,
+                     error=f"deliver: {exc}")
+        return summary
 
+    write_status(session_id, "done", sessions_dir=sessions_dir)
     return summary
 
 
@@ -358,10 +411,12 @@ __all__ = [
     "sessions_root",
     "session_dir",
     "persist_transcript",
+    "write_status",
     "run_offline_pipeline",
     "finalize_session",
     "TRANSCRIPT_FILENAME",
     "STATE_FILENAME",
     "CLASSIFICATION_FILENAME",
     "RESULT_FILENAME",
+    "STATUS_FILENAME",
 ]

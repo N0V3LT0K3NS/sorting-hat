@@ -55,8 +55,18 @@ SENDGRID_API_KEY_ENV = "SENDGRID_API_KEY"
 #: portraits. Required for the email path alongside the SendGrid key.
 DELIVERY_FROM_EMAIL_ENV = "DELIVERY_FROM_EMAIL"
 
-#: Optional base URL the QR code points at. When set, the QR encodes
-#: ``<base>/<session_id>``; otherwise it encodes the local session path.
+#: Base URL of the local delivery server (delivery/server.py) that serves the
+#: per-session portrait page. The QR encodes ``<base>/<session_id>/`` so a
+#: phone on the same wifi lands on the participant's portrait. For the scan to
+#: work from a phone this MUST be the kiosk's LAN IP, not localhost.
+DELIVERY_SERVER_URL_ENV = "DELIVERY_SERVER_URL"
+
+#: Default delivery-server base URL when ``DELIVERY_SERVER_URL`` is unset.
+DEFAULT_DELIVERY_SERVER_URL = "http://localhost:8808"
+
+#: Legacy/fallback base URL the QR code points at. Used only when
+#: ``DELIVERY_SERVER_URL`` is unset; when both are unset the QR encodes the
+#: local session-folder path.
 DELIVERY_BASE_URL_ENV = "DELIVERY_BASE_URL"
 
 #: Filenames written inside each per-session folder.
@@ -181,11 +191,19 @@ def sessions_root() -> Path:
 def build_qr_payload(session_id: str, session_dir: Path) -> str:
     """Return the value to encode in the QR code for a session.
 
-    When ``DELIVERY_BASE_URL`` is set the QR points at a session-specific URL
-    (``<base>/<session_id>``) so a scan reaches the portrait over the network;
-    otherwise it encodes the absolute local session folder path — still a
-    useful, scannable pointer on a standalone kiosk.
+    Resolution order:
+
+    * ``DELIVERY_SERVER_URL`` — the local delivery server (delivery/server.py).
+      The QR points at the per-session page ``<base>/<session_id>/`` so a phone
+      on the same wifi scans straight to the portrait. This is the normal kiosk
+      path; the env value must be the kiosk's LAN IP, not localhost.
+    * ``DELIVERY_BASE_URL`` — legacy fallback, encodes ``<base>/<session_id>``.
+    * neither set — encodes the absolute local session folder path, still a
+      useful pointer on a standalone kiosk.
     """
+    server = (os.environ.get(DELIVERY_SERVER_URL_ENV) or "").strip()
+    if server:
+        return f"{server.rstrip('/')}/{session_id}/"
     base = (os.environ.get(DELIVERY_BASE_URL_ENV) or "").strip()
     if base:
         return f"{base.rstrip('/')}/{session_id}"

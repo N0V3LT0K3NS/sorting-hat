@@ -34,11 +34,13 @@ from agent.session_finalize import (
     CLASSIFICATION_FILENAME,
     RESULT_FILENAME,
     STATE_FILENAME,
+    STATUS_FILENAME,
     TRANSCRIPT_FILENAME,
     finalize_session,
     persist_transcript,
     run_offline_pipeline,
     session_dir,
+    write_status,
 )
 from agent.state import IcebergResult, InterviewState
 
@@ -446,3 +448,83 @@ def test_finalize_can_skip_pipeline(sessions_dir) -> None:
     assert summary.get("pipeline_skipped") is True
     assert (sessions_dir / "sess-skip" / TRANSCRIPT_FILENAME).is_file()
     assert not (sessions_dir / "sess-skip" / CLASSIFICATION_FILENAME).exists()
+
+
+# ---------------------------------------------------------------------------
+# 5. status.json — the delivery server's pipeline-progress file
+# ---------------------------------------------------------------------------
+
+
+def _read_status(folder) -> dict:
+    return json.loads((folder / STATUS_FILENAME).read_text())
+
+
+def test_write_status_writes_the_stage(sessions_dir) -> None:
+    """write_status drops a status.json carrying the named stage."""
+    write_status("sess-st", "rendering", sessions_dir=sessions_dir)
+    status = _read_status(sessions_dir / "sess-st")
+    assert status["session_id"] == "sess-st"
+    assert status["stage"] == "rendering"
+    assert status["error"] is None
+
+
+def test_pipeline_status_ends_done(sessions_dir, monkeypatch) -> None:
+    """A full pipeline run finishes with status.json at stage 'done'."""
+    _mock_pipeline(monkeypatch)
+    state = _peopled_state()
+    run_offline_pipeline("sess-st-done", state, sessions_dir=sessions_dir)
+    status = _read_status(sessions_dir / "sess-st-done")
+    assert status["stage"] == "done"
+    assert status["error"] is None
+
+
+def test_pipeline_writes_status_at_each_stage(sessions_dir, monkeypatch) -> None:
+    """run_offline_pipeline rewrites status.json at every stage boundary.
+
+    write_status is wrapped so the sequence of stages it was called with is
+    captured — proving classifying -> filling -> rendering -> delivering ->
+    done all fire, in order.
+    """
+    _mock_pipeline(monkeypatch)
+    from agent import session_finalize as sf
+
+    seen: list[str] = []
+    real_write_status = sf.write_status
+
+    def spy(session_id, stage, **kwargs):
+        seen.append(stage)
+        return real_write_status(session_id, stage, **kwargs)
+
+    monkeypatch.setattr(sf, "write_status", spy)
+
+    state = _peopled_state()
+    run_offline_pipeline("sess-stages", state, sessions_dir=sessions_dir)
+
+    assert seen == ["classifying", "filling", "rendering", "delivering", "done"]
+
+
+def test_pipeline_status_records_error_stage(sessions_dir, monkeypatch) -> None:
+    """A render failure leaves status.json at stage 'error' with a message."""
+    _mock_pipeline(monkeypatch)
+    from pipeline import render as render_mod
+
+    def boom_render(*args, **kwargs):
+        raise RuntimeError("render exploded")
+
+    monkeypatch.setattr(render_mod, "render", boom_render)
+
+    state = _peopled_state()
+    run_offline_pipeline("sess-st-err", state, sessions_dir=sessions_dir)
+
+    status = _read_status(sessions_dir / "sess-st-err")
+    assert status["stage"] == "error"
+    assert "render" in (status["error"] or "")
+
+
+def test_empty_transcript_writes_error_status(sessions_dir) -> None:
+    """An empty transcript is reported via status.json as stage 'error'."""
+    state = InterviewState()  # no turns
+    run_offline_pipeline("sess-st-empty", state, sessions_dir=sessions_dir)
+    status = _read_status(sessions_dir / "sess-st-empty")
+    assert status["stage"] == "error"
+    assert "empty transcript" in (status["error"] or "")

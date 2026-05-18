@@ -65,6 +65,22 @@ INTERVIEWER_MAX_TOKENS = 250
 
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 
+# ---------------------------------------------------------------------------
+# Delivery server
+# ---------------------------------------------------------------------------
+# The local kiosk delivery server (delivery/server.py) serves finished
+# portraits and exposes a pipeline-progress status endpoint the kiosk polls.
+# It binds 0.0.0.0 on DELIVERY_SERVER_PORT so phones on the same wifi can
+# reach the per-session portrait page the QR code points at.
+
+#: Default port the delivery server binds.
+DEFAULT_DELIVERY_SERVER_PORT = 8808
+
+#: Default delivery-server base URL. On a real kiosk this should be set to the
+#: kiosk machine's LAN IP (e.g. http://192.168.1.42:8808) so the QR scans from
+#: a phone — localhost only works for a browser on the kiosk itself.
+DEFAULT_DELIVERY_SERVER_URL = "http://localhost:8808"
+
 
 def _clean(value: str | None) -> str | None:
     """Return a stripped value, or ``None`` if it is empty/whitespace."""
@@ -114,6 +130,11 @@ class Config:
 
     # --- Runtime ------------------------------------------------------------
     sessions_dir: Path
+
+    # --- Delivery server ----------------------------------------------------
+    # The local kiosk server that serves portraits + the status endpoint.
+    delivery_server_port: int
+    delivery_server_url: str
 
     @property
     def has_livekit(self) -> bool:
@@ -183,6 +204,17 @@ def load_config() -> Config:
     """
     sessions_dir = Path(_clean(os.getenv("SESSIONS_DIR")) or "./sessions")
 
+    raw_port = _clean(os.getenv("DELIVERY_SERVER_PORT"))
+    try:
+        delivery_server_port = int(raw_port) if raw_port else DEFAULT_DELIVERY_SERVER_PORT
+    except ValueError:
+        logger.warning(
+            "DELIVERY_SERVER_PORT=%r is not an integer — using default %d",
+            raw_port,
+            DEFAULT_DELIVERY_SERVER_PORT,
+        )
+        delivery_server_port = DEFAULT_DELIVERY_SERVER_PORT
+
     return Config(
         livekit_url=_clean(os.getenv("LIVEKIT_URL")),
         livekit_api_key=_clean(os.getenv("LIVEKIT_API_KEY")),
@@ -200,6 +232,9 @@ def load_config() -> Config:
         llm_fallback_model=_clean(os.getenv("INTERVIEWER_FALLBACK_MODEL"))
         or FALLBACK_LLM_MODEL,
         sessions_dir=sessions_dir,
+        delivery_server_port=delivery_server_port,
+        delivery_server_url=_clean(os.getenv("DELIVERY_SERVER_URL"))
+        or DEFAULT_DELIVERY_SERVER_URL,
     )
 
 
