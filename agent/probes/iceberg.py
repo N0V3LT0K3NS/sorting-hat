@@ -12,12 +12,12 @@ the probe prompt (``prompts/probe_iceberg.md``), then calls the
 result and calls ``self.complete()`` to finish the task and hand the result
 back to whoever invoked it.
 
-TODO(G8): the supervisor in ``agent/interviewer.py`` constructs and runs this
-task — ``await IcebergProbeTask()`` — once the base questions are done and the
+The supervisor in ``agent/interviewer.py`` constructs and runs this task —
+``await IcebergProbeTask()`` — once the base questions are done and the
 Iceberg signal leads. The supervisor stores the returned ``IcebergResult`` on
 ``InterviewState.iceberg_result`` and sets ``chosen_template = "iceberg"``. A
 result with ``thin_result`` set tells the supervisor the probe did not land so
-it can pivot to another shape. No probe behaviour is wired here in G4.
+it can pivot to another shape. This module defines the probe in isolation.
 """
 
 from __future__ import annotations

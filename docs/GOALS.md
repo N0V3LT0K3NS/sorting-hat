@@ -31,7 +31,7 @@ Every dispatched goal's completion condition ends with:
 
 ## Phase 1 — Data foundation
 
-### G1 · `InterviewState` + typed result schemas — `PENDING` · CC
+### G1 · `InterviewState` + typed result schemas — `VERIFIED` · CC
 - **Context:** Pure data layer. The brief's `InterviewState` dataclass plus
   the four typed probe results. No LiveKit, no I/O. Everything downstream
   depends on these types being correct and stable.
@@ -48,7 +48,7 @@ Every dispatched goal's completion condition ends with:
 
 ## Phase 2 — The interview
 
-### G2 · Single LiveKit voice agent (walking skeleton) — `PENDING` · CC
+### G2 · Single LiveKit voice agent (walking skeleton) — `VERIFIED` · CC
 - **Context:** The brief's step 1. One agent that simply talks, on the
   current LiveKit stack. No interview logic. Proves low-latency voice works.
 - **Outcome:** `agent/main.py` runs an `AgentSession` + one `Agent`.
@@ -65,7 +65,7 @@ Every dispatched goal's completion condition ends with:
   interviewer model token-streams through the OpenRouter route (streaming +
   custom base_url is the one fragile spot).
 
-### G3 · `InterviewerAgent` persona + base 5 questions — `PENDING` · CC + HERMES
+### G3 · `InterviewerAgent` persona + base 5 questions — `VERIFIED` · CC + HERMES
 - **Context:** The brief's step 2. The persona prompt absorbs `prompter`'s
   craft (see `docs/borrowed-craft.md`): DRILL/ZOOM, banned phrasings, output
   discipline, DRIFT CHECK. Asks the 5 base questions in order, handles
@@ -78,7 +78,7 @@ Every dispatched goal's completion condition ends with:
 - **Proving command:** `uv run pytest tests/test_interviewer.py -v`
 - **Completion:** proving command exits 0; HERMES review notes addressed.
 
-### G3.1 · Persona craft fix — add the CROSS move — `PENDING` · CC
+### G3.1 · Persona craft fix — add the CROSS move — `VERIFIED` · CC
 - **Context:** The G3 adversarial review found the DRILL IN / ZOOM OUT
   binary is not exhaustive. It omits the **CROSS / lateral move** (pit one
   thing against another, ask the negative case, ask the source) — and
@@ -95,10 +95,10 @@ Every dispatched goal's completion condition ends with:
   `tests/test_interviewer.py`.
 - **Proving command:** `uv run pytest tests/test_interviewer.py -v`
 
-### G4 · Iceberg probe `AgentTask` — `PENDING` · CC + HERMES
-### G5 · Two-Buttons probe `AgentTask` — `PENDING` · CC + HERMES
-### G6 · Compass probe `AgentTask` — `PENDING` · CC + HERMES
-### G7 · Arc probe `AgentTask` — `PENDING` · CC + HERMES
+### G4 · Iceberg probe `AgentTask` — `VERIFIED` · CC + HERMES
+### G5 · Two-Buttons probe `AgentTask` — `VERIFIED` · CC + HERMES
+### G6 · Compass probe `AgentTask` — `VERIFIED` · CC + HERMES
+### G7 · Arc probe `AgentTask` — `VERIFIED` · CC + HERMES
 - **Context:** The brief's step 3. Four parallel goals (dispatched as a
   swarm once G3 verifies). Each is a focused sub-interview returning the
   matching typed result; deepens into its template; pivots if results
@@ -110,7 +110,7 @@ Every dispatched goal's completion condition ends with:
 - **Completion:** proving command exits 0; produces a fully-populated typed
   result from a scripted willing user.
 
-### G8 · Supervisor routing — `PENDING` · CC
+### G8 · Supervisor routing — `VERIFIED` · CC
 - **Context:** The brief's step 4. Wires `InterviewerAgent` to read signal
   weights, invoke the winning probe, pivot on thin results, close gracefully
   when `chosen_template` + result are set.
@@ -123,7 +123,7 @@ Every dispatched goal's completion condition ends with:
 
 ## Phase 3 — Offline analysis (runs parallel to Phase 2; needs only G1)
 
-### G9 · `classify(transcript_xml) -> label` — `PENDING` · CX
+### G9 · `classify(transcript_xml) -> label` — `VERIFIED` · CX
 - **Outcome:** `pipeline/classify.py` + `prompts/classify.md`. Authoritative
   classification: template + confidence + reasoning. Transcript passed as
   escaped XML. Importable and standalone. LLM call via OpenRouter (the
@@ -132,14 +132,14 @@ Every dispatched goal's completion condition ends with:
   `tests/test_classify.py`, `tests/fixtures/`.
 - **Proving command:** `uv run pytest tests/test_classify.py -v`
 
-### G10 · `fill(label, transcript_xml, probe_result) -> typed_result` — `PENDING` · CX
+### G10 · `fill(label, transcript_xml, probe_result) -> typed_result` — `VERIFIED` · CX
 - **Outcome:** `pipeline/fill.py` + `prompts/fill.md`. Structured-output
   slot-filling, char limits enforced per template. LLM call via OpenRouter
   (the OpenAI SDK pointed at the OpenRouter base URL).
 - **In-scope:** `pipeline/fill.py`, `prompts/fill.md`, `tests/test_fill.py`.
 - **Proving command:** `uv run pytest tests/test_fill.py -v`
 
-### G11 · `render(typed_result) -> png` — `PENDING` · CC
+### G11 · `render(typed_result) -> png` — `VERIFIED` · CC
 - **Outcome:** `pipeline/render.py` + the four base images in
   `assets/templates/`. Pillow compositing, per-template layout.
 - **In-scope:** `pipeline/render.py`, `assets/templates/*`,
@@ -147,13 +147,13 @@ Every dispatched goal's completion condition ends with:
 - **Proving command:** `uv run pytest tests/test_render.py -v` (asserts a
   non-empty PNG is produced for each of the four templates).
 
-### G12 · `deliver(png, session)` — `PENDING` · CC
+### G12 · `deliver(png, session)` — `VERIFIED` · CC
 - **Outcome:** `pipeline/deliver.py`. QR code + per-session folder write;
   email behind a flag (degrades if no SendGrid key).
 - **In-scope:** `pipeline/deliver.py`, `tests/test_deliver.py`.
 - **Proving command:** `uv run pytest tests/test_deliver.py -v`
 
-### G13 · Test harness — scripted personas — `PENDING` · CX + HERMES
+### G13 · Test harness — scripted personas — `VERIFIED` · CX + HERMES
 - **Context:** The brief says this matters more than unit tests. Scripted
   transcripts for the 4 clean templates PLUS deliberate hybrid personas.
   Asserts `classify` lands; defines explicit behavior for low-confidence
@@ -167,7 +167,7 @@ Every dispatched goal's completion condition ends with:
 
 ## Phase 4 — The clever part, last
 
-### G14 · Background classifier (observer pattern) — `PENDING` · CC
+### G14 · Background classifier (observer pattern) — `VERIFIED` · CC
 - **Context:** The brief's step 6. `asyncio.create_task` after each user
   turn; a fast small model via OpenRouter (Llama/Qwen-class, routed to a
   fast provider); off the critical path; timeout-guarded so failure never
@@ -182,12 +182,12 @@ Every dispatched goal's completion condition ends with:
 
 ## Phase 5 — Kiosk + delivery
 
-### G15 · Next.js kiosk frontend — `PENDING` · CC
+### G15 · Next.js kiosk frontend — `VERIFIED` · CC
 - **Outcome:** `kiosk/` — three screens (Idle / Active / Complete), black
   background, single accent, `BarVisualizer`, fullscreen.
 - **Proving command:** `cd kiosk && npm run build` succeeds.
 
-### G16 · Kiosk hardware integration — `PENDING` · CC
+### G16 · Kiosk hardware integration — `VERIFIED` · CC
 - **Outcome:** audio I/O on real hardware, LiveKit noise cancellation,
   start-button -> room -> agent dispatch lifecycle.
 - **Proving command:** `cd kiosk && npm run build`; lifecycle smoke test
