@@ -82,6 +82,14 @@ BASE_QUESTIONS: tuple[str, ...] = (
 
 BASE_QUESTION_COUNT: int = len(BASE_QUESTIONS)
 
+# The live interviewer is intentionally a plain conversational LLM, so it
+# does not self-report "question complete" via tools. The supervisor infers
+# base-question progress from completed interviewee turns captured by the
+# session observer: roughly two substantive interviewee turns per base thread
+# (initial answer + follow-up) finishes the five-question base interview after
+# ten interviewee turns, early enough to leave room for a probe.
+INTERVIEWEE_TURNS_PER_BASE_QUESTION: int = 2
+
 
 def load_persona() -> str:
     """Read and return the InterviewerAgent persona prompt.
@@ -312,12 +320,11 @@ class InterviewerAgent(Agent):
         return BASE_QUESTIONS[idx]
 
     def advance_base_question(self) -> None:
-        """Mark the current base-question thread complete.
+        """Mark one base-question thread complete, monotonically.
 
-        Called when a base question and its follow-ups have yielded something
-        real and the interview is ready to move on. Advancing past the last
-        question is a no-op guarded by an assertion — the supervisor must not
-        over-count.
+        The live supervisor calls this from a turn-count heuristic, not from
+        an LLM tool contract. Advancing past the last question is a guarded
+        no-op so repeated observer events cannot over-count.
         """
         if self._state.base_questions_completed >= BASE_QUESTION_COUNT:
             logger.warning(
@@ -332,6 +339,30 @@ class InterviewerAgent(Agent):
             self._state.base_questions_completed,
             BASE_QUESTION_COUNT,
         )
+
+    def advance_base_questions_from_interviewee_turns(
+        self, interviewee_turns: int
+    ) -> int:
+        """Advance base progress from the observed interviewee-turn count.
+
+        Every :data:`INTERVIEWEE_TURNS_PER_BASE_QUESTION` completed
+        interviewee turns counts as one base question completed. The computed
+        target is monotonic and saturates at :data:`BASE_QUESTION_COUNT`; this
+        method only moves state forward and returns how many increments it
+        applied.
+        """
+        if interviewee_turns <= 0:
+            return 0
+
+        target = min(
+            BASE_QUESTION_COUNT,
+            interviewee_turns // INTERVIEWEE_TURNS_PER_BASE_QUESTION,
+        )
+        advanced = 0
+        while self._state.base_questions_completed < target:
+            self.advance_base_question()
+            advanced += 1
+        return advanced
 
     # --- Background classifier (G14, observer pattern) --------------------
 
@@ -556,6 +587,10 @@ class InterviewerAgent(Agent):
         ``None`` if no probe ran at all). The authoritative verdict is always
         on :class:`InterviewState`.
         """
+        if self.routing_done:
+            logger.info("route_to_probe() called after routing is done — ignoring")
+            return None
+
         if not self.base_questions_done:
             logger.warning(
                 "route_to_probe() called before the base interview is "

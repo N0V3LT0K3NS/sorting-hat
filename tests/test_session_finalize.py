@@ -24,7 +24,12 @@ import json
 
 import pytest
 
-from agent.interviewer import BASE_QUESTION_COUNT, InterviewerAgent
+from agent.interviewer import (
+    BASE_QUESTION_COUNT,
+    INTERVIEWEE_TURNS_PER_BASE_QUESTION,
+    InterviewerAgent,
+    ProbeOutcome,
+)
 from agent.session_finalize import (
     CLASSIFICATION_FILENAME,
     RESULT_FILENAME,
@@ -253,6 +258,87 @@ def test_wired_handler_records_and_persists_each_turn(sessions_dir) -> None:
         (sessions_dir / "sess-wired" / TRANSCRIPT_FILENAME).read_text()
     )
     assert len(on_disk) == 2
+
+
+def test_wired_handler_drives_supervisor_turn_progress_and_routes_once(
+    sessions_dir, monkeypatch
+) -> None:
+    """The live conversation observer advances state and routes without tools."""
+    from agent import main as main_mod
+
+    route_log: list[str] = []
+    finalize_calls: list[str] = []
+
+    async def fake_iceberg_runner() -> ProbeOutcome:
+        route_log.append("iceberg")
+        return ProbeOutcome(
+            template="iceberg",
+            result=IcebergResult(
+                surface="The calm one.",
+                first_layer="Privately carrying the room.",
+                second_layer="Unsure where usefulness ends.",
+                abyss="Afraid there is no self beneath it.",
+            ),
+            thin=False,
+        )
+
+    async def fake_finalize(session, session_id, state):
+        finalize_calls.append(session_id)
+        await session.aclose()
+        return {"pipeline_skipped": True}
+
+    monkeypatch.setattr(main_mod, "finalize_session", fake_finalize)
+
+    async def run_wired_turns() -> tuple[InterviewState, FakeSession]:
+        state = InterviewState()
+        agent = InterviewerAgent(
+            state=state,
+            probe_runners={"iceberg": fake_iceberg_runner},
+        )
+        session = FakeSession()
+        captured: list = []
+        session.on = lambda event, cb: captured.append(cb)  # type: ignore
+        main_mod.wire_session_finalize(session, agent, state, "sess-supervised")
+        handler = captured[0]
+
+        class FakeItem:
+            def __init__(self, role: str, text: str) -> None:
+                self.role = role
+                self.text_content = text
+
+        class FakeEvent:
+            def __init__(self, item: object) -> None:
+                self.item = item
+
+        turns_needed = INTERVIEWEE_TURNS_PER_BASE_QUESTION * BASE_QUESTION_COUNT
+        for idx in range(turns_needed):
+            handler(FakeEvent(FakeItem("user", f"Interviewee answer {idx}.")))
+
+        for _ in range(3):
+            await asyncio.sleep(0)
+
+        # A later turn must not route or finalize a second time.
+        handler(FakeEvent(FakeItem("user", "One more answer after routing.")))
+        for _ in range(3):
+            await asyncio.sleep(0)
+
+        assert agent.base_questions_completed == BASE_QUESTION_COUNT
+        assert agent.routing_done is True
+        return state, session
+
+    state, session = asyncio.run(run_wired_turns())
+
+    assert route_log == ["iceberg"]
+    assert state.chosen_template == "iceberg"
+    assert isinstance(state.iceberg_result, IcebergResult)
+    assert finalize_calls == ["sess-supervised"]
+    assert session.closed is True
+
+    saved_state = json.loads(
+        (sessions_dir / "sess-supervised" / STATE_FILENAME).read_text()
+    )
+    assert saved_state["base_questions_completed"] == BASE_QUESTION_COUNT
+    assert saved_state["chosen_template"] == "iceberg"
 
 
 # ---------------------------------------------------------------------------
