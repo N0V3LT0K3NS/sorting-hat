@@ -57,7 +57,8 @@ from livekit.plugins import deepgram, openai, silero
 from livekit.plugins.turn_detector.english import EnglishModel
 
 from agent.config import INTERVIEWER_MAX_TOKENS, DIRECT_STT_MODEL, Config, load_config
-from agent.interviewer import InterviewerAgent
+from agent.interviewer import INTERVIEWEE_ROLE, INTERVIEWER_ROLE, InterviewerAgent
+from agent.session_finalize import finalize_session, persist_transcript
 from agent.state import InterviewState
 
 logging.basicConfig(level=logging.INFO)
@@ -286,6 +287,71 @@ def instrument_latency(session: AgentSession) -> None:
 
 
 # ---------------------------------------------------------------------------
+# FIX-3 — close-on-routing-complete, incremental persist, pipeline trigger
+# ---------------------------------------------------------------------------
+
+
+def wire_session_finalize(
+    session: AgentSession,
+    agent: InterviewerAgent,
+    state: InterviewState,
+    session_id: str,
+) -> None:
+    """Wire FIX-3's three fixes onto a live session.
+
+    Registers one handler on the session's ``conversation_item_added`` event
+    — fired once per completed user and agent turn — that:
+
+    1. **Records the turn** onto :class:`InterviewState` (fix 2: confirm turns
+       are captured — an empty transcript is worthless).
+    2. **Persists the transcript incrementally** to ``sessions/<id>/`` after
+       every turn (fix 2b), so a browser refresh or crash mid-interview never
+       loses what was said.
+    3. **Closes the session and runs the offline pipeline** once the
+       supervisor's routing has settled — :attr:`InterviewerAgent.routing_done`
+       is True (a probe landed, the closing was spoken). ``finalize_session``
+       calls ``session.aclose()`` (the mic stops), writes the finalised
+       snapshot, then runs ``classify -> fill -> render -> deliver``.
+
+    The handler is synchronous (LiveKit event callbacks are); the finalize
+    coroutine is scheduled as a background task so the event callback returns
+    immediately. A guard flag makes the close-and-finalize fire exactly once.
+    """
+    finalize_started = {"done": False}
+
+    def _on_conversation_item(ev: object) -> None:
+        # ev.item is a llm.ChatMessage — role "user"/"assistant", text in
+        # .text_content. Map onto the transcript's interviewer/interviewee.
+        item = getattr(ev, "item", None)
+        if item is None:
+            return
+        role = getattr(item, "role", None)
+        text = getattr(item, "text_content", None)
+        speaker = INTERVIEWER_ROLE if role == "assistant" else INTERVIEWEE_ROLE
+        agent.record_turn(speaker, text or "")
+
+        # fix 2b — incremental persist after every turn.
+        try:
+            persist_transcript(session_id, state)
+        except Exception as exc:  # never let persistence crash the session
+            logger.warning("incremental transcript persist failed: %s", exc)
+
+        # fix 1 + 3 — once routing has settled, close + run the pipeline.
+        if agent.routing_done and not finalize_started["done"]:
+            finalize_started["done"] = True
+            logger.info(
+                "session %s: routing complete — closing session and "
+                "triggering the offline pipeline",
+                session_id,
+            )
+            asyncio.ensure_future(
+                finalize_session(session, session_id, state)
+            )
+
+    session.on("conversation_item_added", _on_conversation_item)
+
+
+# ---------------------------------------------------------------------------
 # Live worker entrypoint
 # ---------------------------------------------------------------------------
 
@@ -294,8 +360,8 @@ async def entrypoint(ctx: JobContext) -> None:
     """LiveKit worker entrypoint — runs one interview per job.
 
     Builds the session, attaches the native turn detector (constructable now
-    that a job context exists), wires latency instrumentation, joins the room,
-    and starts the agent.
+    that a job context exists), wires latency instrumentation and FIX-3's
+    close/persist/pipeline seam, joins the room, and starts the agent.
     """
     cfg = load_config()
     cfg.warn_missing()
@@ -316,6 +382,13 @@ async def entrypoint(ctx: JobContext) -> None:
     agent.turn_detection = EnglishModel()
 
     instrument_latency(parts.session)
+
+    # FIX-3: the session id is the room name — one room per interview. Wire
+    # turn-recording, incremental persistence, and the close-on-routing-
+    # complete pipeline trigger before the session starts so the very first
+    # turn is captured.
+    session_id = ctx.room.name
+    wire_session_finalize(parts.session, agent, parts.state, session_id)
 
     await ctx.connect()
     await parts.session.start(agent=agent, room=ctx.room)

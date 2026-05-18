@@ -47,6 +47,12 @@ from agent.state import (
 
 logger = logging.getLogger("sorting-hat.interviewer")
 
+# Speaker labels for recorded transcript turns. The offline pipeline's
+# wrap_transcript_xml() normalises these onto its <interviewer>/<interviewee>
+# tags; "assistant"/"user" are the LiveKit ChatMessage roles they map from.
+INTERVIEWER_ROLE = "interviewer"
+INTERVIEWEE_ROLE = "interviewee"
+
 # ---------------------------------------------------------------------------
 # Persona prompt — loaded from prompts/persona.md
 # ---------------------------------------------------------------------------
@@ -437,6 +443,27 @@ class InterviewerAgent(Agent):
             await asyncio.gather(*pending, return_exceptions=True)
         self._classifier_tasks.clear()
 
+    # --- Turn recording (FIX-3, fix 2) ------------------------------------
+
+    def record_turn(self, speaker: str, text: str) -> None:
+        """Record one interview turn onto the shared :class:`InterviewState`.
+
+        FIX-3's fix 2: a turn that is never recorded is a turn lost. The live
+        worker calls this off the session's ``conversation_item_added`` event
+        — once per user and per agent turn — so the transcript log is built
+        as the interview runs, not reconstructed afterwards.
+
+        Delegates to :meth:`InterviewState.record_turn`, which ignores an
+        empty/whitespace ``text``. Incremental persistence to disk is a
+        separate concern wired by the worker (see :mod:`agent.session_finalize`).
+        """
+        self._state.record_turn(speaker, text)
+        logger.debug(
+            "recorded %s turn (%d turns total)",
+            speaker,
+            len(self._state.transcript_log),
+        )
+
     # --- Supervisor routing (G8) ------------------------------------------
 
     @property
@@ -603,6 +630,8 @@ __all__ = [
     "DEFAULT_PROBE_RUNNERS",
     "MAX_PROBE_ATTEMPTS",
     "TEMPLATE_ORDER",
+    "INTERVIEWER_ROLE",
+    "INTERVIEWEE_ROLE",
     "classify_turn",
     "apply_scores",
 ]
