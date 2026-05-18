@@ -41,6 +41,25 @@ lifecycle end to end.
 - [ ] Right-click (or long-press) does **not** open a context menu.
 - [ ] Ctrl/Cmd + `+` / `-` / `0` does **not** zoom the page.
 
+### Optional Shape Rotator interface
+
+If testing the experimental Shape Rotator skin, build or run with
+`NEXT_PUBLIC_SHAPE_ROTATOR_INTERFACE=1`.
+
+- [ ] With the flag **unset**, the default Idle screen still renders exactly
+      as above.
+- [ ] With the flag set, the Idle screen renders the Shape Rotator field and
+      the _Enter the field_ CTA.
+- [ ] Pressing the Shape CTA follows the same mic preflight, fullscreen,
+      token-minting, and LiveKit join path as the default UI.
+- [ ] During the interview, the Shape object responds subtly to local speech
+      while listening and to agent speech while speaking.
+- [ ] The Shape UI preserves the same live-phase End behavior: no End control
+      during base questions, _End early_ during probing, and _I'm done_ once
+      routing is complete.
+- [ ] The Complete screen covers all delivery states: generating stage copy,
+      done portrait + QR reveal, and graceful error/timeout closeout.
+
 ## 2. Audio preflight — the failure paths
 
 Test these **before** the happy path, so a calm failure is proven first.

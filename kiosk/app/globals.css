@@ -7,6 +7,23 @@
   --accent: #e8b04b; /* a single warm amber accent */
   --accent-dim: #7a5e2a;
   --error: #c96a4f;
+
+  /* Optional Shape Rotator interface tokens. Additive only: the default
+     kiosk skin above remains the active interface unless the feature flag is
+     enabled. */
+  --shape-bg: #211d1f;
+  --shape-paper: #f1ece7;
+  --shape-paper-muted: rgba(241, 236, 231, 0.66);
+  --shape-red: #8f220e;
+  --shape-red-light: #d97047;
+  --shape-red-soft: #b45433;
+  --shape-error: #e58b70;
+  --shape-sans:
+    "Space Grotesk", ui-sans-serif, system-ui, -apple-system, "Segoe UI",
+    sans-serif;
+  --shape-mono:
+    "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas,
+    monospace;
 }
 
 * {

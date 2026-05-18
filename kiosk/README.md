@@ -37,6 +37,47 @@ Black background, a single warm amber accent, large readable type, and
 calm fade transitions with a slow breathing glow so the idle screen never
 feels dead.
 
+## Optional Shape Rotator interface
+
+This branch adds an experimental Shape Rotator-style skin behind a build-time
+flag:
+
+```sh
+NEXT_PUBLIC_SHAPE_ROTATOR_INTERFACE=1 npm run build
+NEXT_PUBLIC_SHAPE_ROTATOR_INTERFACE=1 npm run dev
+```
+
+Leave `NEXT_PUBLIC_SHAPE_ROTATOR_INTERFACE` unset or blank to keep the current
+minimal kiosk interface. The flag swaps only the visitor-facing screens; the
+kiosk state machine, token minting, `<LiveKitRoom>` lifecycle, Krisp noise
+cancellation, delivery-server polling, hidden developer transcript, and reset
+logic are unchanged.
+
+Coverage of the full visitor process:
+
+1. **Idle / start** — a Shape Rotator field, one CTA, the same microphone
+   preflight, fullscreen request, token minting, and calm error handling as
+   the default screen.
+2. **Active interview** — the same LiveKit room and agent watchdog, with a
+   voice-reactive red soft-body shape driven by local mic level while
+   listening and agent output level while speaking. It keeps the live
+   `/live/<session-id>` polling and the same state-gated End controls:
+   hidden during base questions, _End early_ during probing, and _I'm done_
+   once routing is complete.
+3. **Complete / generating** — the same `/status/<session-id>` polling,
+   timeout ceiling, and stage progression, rendered as a Shape Rotator reveal
+   pipeline.
+4. **Complete / portrait reveal** — the finished portrait and optional QR are
+   shown in the Shape Rotator frame, then the parent kiosk dwell/reset path
+   returns the station to Idle.
+5. **Error / timeout** — missing session ids, delivery errors, and timeouts
+   resolve to the same calm closeout semantics as the default interface.
+
+The Shape interface has its own CSS module and progress component so its
+visual system does not reach back into the default kiosk skin. The only shared
+integration point is `Kiosk.tsx`, where the feature flag selects which screen
+component renders for each lifecycle phase.
+
 ## Developer dashboard (`/dev`)
 
 A separate diagnostic route at `/dev`, away from the visitor kiosk flow at

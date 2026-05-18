@@ -29,3 +29,6 @@ sessions/
 .DS_Store
 .idea/
 .vscode/
+.claude/
+.playwright-cli/
+output/playwright/

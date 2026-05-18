@@ -16,17 +16,20 @@
     "@livekit/components-react": "^2.9.0",
     "@livekit/components-styles": "^1.1.4",
     "@livekit/krisp-noise-filter": "0.3.4",
+    "@react-three/fiber": "9.6.1",
     "livekit-client": "^2.9.0",
     "livekit-server-sdk": "^2.9.0",
     "next": "^15.5.4",
     "react": "^19.0.0",
-    "react-dom": "^19.0.0"
+    "react-dom": "^19.0.0",
+    "three": "0.184.0"
   },
   "devDependencies": {
     "@eslint/eslintrc": "^3.2.0",
     "@types/node": "^22.10.0",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
+    "@types/three": "0.184.1",
     "eslint": "^9.17.0",
     "eslint-config-next": "^15.5.4",
     "typescript": "^5.7.0"
