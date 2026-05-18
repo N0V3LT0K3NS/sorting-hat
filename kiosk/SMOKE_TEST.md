@@ -15,6 +15,11 @@ lifecycle end to end.
 
 - [ ] `kiosk/.env.local` has a valid `LIVEKIT_URL`, `LIVEKIT_API_KEY`, and
       `LIVEKIT_API_SECRET`.
+- [ ] `kiosk/.env.local` has `NEXT_PUBLIC_DELIVERY_SERVER_URL` set to the
+      kiosk machine's LAN IP (e.g. `http://192.168.1.42:8808`), not
+      `localhost` — the Complete-screen QR must be scannable from a phone.
+- [ ] The delivery server is running on the kiosk machine
+      (`uv run python -m delivery.server` from the repo root).
 - [ ] The external microphone is connected and set as the OS **default
       input device**.
 - [ ] The external speaker is connected and at a sensible volume.
@@ -90,9 +95,9 @@ Test these **before** the happy path, so a calm failure is proven first.
 Run **each** ending and confirm the kiosk returns cleanly to Idle:
 
 - [ ] **Agent ends the interview.** Let the interview run to completion.
-      The room disconnects, the Complete screen shows "Thank you. Your
-      portrait is being made.", and after a short pause the kiosk resets
-      to Idle on its own.
+      The room disconnects and the Complete screen appears — see section 7
+      below for the portrait reveal it then runs. After the reveal the
+      kiosk resets to Idle on its own.
 - [ ] **Visitor walks away.** Mid-interview, close/refuse the connection
       (e.g. disable the network briefly, or have the agent worker stop).
       The kiosk advances to Complete and then resets — no frozen screen.
@@ -105,7 +110,30 @@ Run **each** ending and confirm the kiosk returns cleanly to Idle:
 > initial/Connecting connection state is not a disconnect; only a drop
 > *after* the room has connected ends the session.
 
-## 7. Back-to-back sessions — no state leak
+## 7. Complete screen — the portrait reveal
+
+The Complete screen polls the delivery server (`NEXT_PUBLIC_DELIVERY_SERVER_URL`)
+for `/status/<session-id>` and reveals the portrait. Run with the delivery
+server up and the agent worker producing real portraits.
+
+- [ ] **Stage reveal.** Right after the interview ends, the screen reads
+      "Making your portrait." with a stage line that advances —
+      _Reading your interview… → Finding your shape… → Drawing your
+      portrait… → Almost there…_ — and a row of step dots that fill as the
+      pipeline progresses. It is calm and still, not a loud spinner.
+- [ ] **Portrait + QR reveal.** When the pipeline finishes (~90 s–3 min),
+      the finished portrait appears full-size with a QR code beside (or
+      below) it and the line "Scan to keep it on your phone".
+- [ ] **The QR works.** Scan it with a phone on the same wifi — it opens
+      the portrait page served by the delivery server. (If it fails, check
+      `NEXT_PUBLIC_DELIVERY_SERVER_URL` is the LAN IP, not `localhost`.)
+- [ ] **Error / timeout fallback.** Stop the delivery server (or let a
+      session error), end an interview, and confirm the Complete screen
+      shows a calm closing message — _"Your portrait is on its way…"_ —
+      and still resets to Idle. It never strands the visitor on a broken
+      or frozen screen.
+
+## 8. Back-to-back sessions — no state leak
 
 - [ ] Run **three interviews in a row** without reloading the page.
 - [ ] Each session gets a fresh room (the agent log shows a new room name
@@ -115,7 +143,7 @@ Run **each** ending and confirm the kiosk returns cleanly to Idle:
 - [ ] The third session behaves identically to the first — no audio
       artefacts, no stale connection, no degraded latency.
 
-## 8. Recovery
+## 9. Recovery
 
 - [ ] Reloading the page at any time returns the kiosk to a clean Idle
       screen — the attendant's one manual reset path.

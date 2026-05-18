@@ -23,8 +23,15 @@ A single state machine: `idle → active → complete → (auto-reset) → idle`
    speaking indicator. **No transcript by default** — seeing one's own
    words changes the dynamic of the interview. A hidden hotspot in the
    bottom-right corner toggles a developer transcript view.
-3. **Complete** — "Thank you. Your portrait is being made." After a short
-   pause the kiosk resets itself to Idle for the next visitor.
+3. **Complete** — the post-interview reveal. While the offline portrait
+   pipeline runs (~90 s–3 min) the screen shows a calm **stage-by-stage
+   reveal** — _Reading your interview… → Finding your shape… → Drawing your
+   portrait… → Almost there…_ — polling the local delivery server for
+   progress. When the portrait is ready it is shown **full-size on the
+   screen** with a **QR code** the visitor scans to keep the portrait on
+   their phone. A pipeline error, an unreachable delivery server, or a
+   timeout all degrade to a calm closing message — never a broken screen.
+   After the reveal the kiosk resets itself to Idle for the next visitor.
 
 Black background, a single warm amber accent, large readable type, and
 calm fade transitions with a slow breathing glow so the idle screen never
@@ -72,10 +79,15 @@ state leaking from one visitor to the next.
                  │    All three end the session gracefully.
                  ▼
   ┌─ complete ──────────────────────────────────────────────────────┐
-  │  9. CLEAN UP + RESET                                             │
+  │  9. CLEAN UP                                                     │
   │     The <LiveKitRoom> unmounts: livekit-client tears down the    │
-  │     WebRTC peer connection and releases the microphone. After a  │
-  │     short dwell the kiosk returns to Idle, fully reset.          │
+  │     WebRTC peer connection and releases the microphone.          │
+  │ 10. REVEAL                                                       │
+  │     The Complete screen polls the local delivery server for      │
+  │     portrait-pipeline progress, shows a stage-by-stage reveal,   │
+  │     then the finished portrait + a QR code to the phone.         │
+  │ 11. RESET                                                        │
+  │     After the reveal the kiosk returns to Idle, fully reset.     │
   └─────────────────────────────────────────────────────────────────┘
 ```
 
@@ -155,14 +167,24 @@ cp .env.local.example .env.local   # then fill in the values
 
 Set these in `.env.local` (documented in `.env.local.example`):
 
-| Variable             | Purpose                                            |
-| -------------------- | -------------------------------------------------- |
-| `LIVEKIT_URL`        | `wss://` URL of your LiveKit project               |
-| `LIVEKIT_API_KEY`    | LiveKit API key (server-side only)                 |
-| `LIVEKIT_API_SECRET` | LiveKit API secret (server-side only)              |
+| Variable                          | Purpose                                            |
+| ---------------------------------- | -------------------------------------------------- |
+| `LIVEKIT_URL`                      | `wss://` URL of your LiveKit project               |
+| `LIVEKIT_API_KEY`                  | LiveKit API key (server-side only)                 |
+| `LIVEKIT_API_SECRET`               | LiveKit API secret (server-side only)              |
+| `NEXT_PUBLIC_DELIVERY_SERVER_URL`  | Base URL of the local delivery server              |
 
 The API key and secret are used **only** in the server-side token route;
 they are never sent to the browser.
+
+`NEXT_PUBLIC_DELIVERY_SERVER_URL` points the Complete screen at the local
+delivery server (`delivery/server.py`) — it polls `/status/<session-id>`
+for portrait-pipeline progress and loads the finished portrait and QR
+image from it. Because the QR code sends a **phone** to this same server,
+the value **must be the kiosk machine's LAN IP** (e.g.
+`http://192.168.1.42:8808`), not `localhost` — a phone cannot resolve the
+kiosk's `localhost`. The `localhost` default is only correct when testing
+the kiosk page on the kiosk machine itself.
 
 If LiveKit is not configured, the app still builds and the idle screen
 still renders — pressing _begin_ simply shows a calm, non-fatal error
@@ -253,8 +275,10 @@ on different machines, as long as both use the same LiveKit credentials.
 ### 6. How a session resets for the next person
 
 When an interview ends — the agent finishes, or the visitor leaves and the
-connection drops — the kiosk shows the Complete screen briefly, tears down
-the LiveKit room (releasing the microphone), and returns to Idle on its
+connection drops — the kiosk tears down the LiveKit room (releasing the
+microphone) and shows the Complete screen. That screen runs the portrait
+reveal (stage progress, then portrait + QR); once the reveal has landed it
+holds briefly so a visitor can scan the QR, then returns to Idle on its
 own. No attendant action is needed between visitors. If an attendant ever
 needs to force a reset, reloading the page returns the kiosk to a clean
 Idle state.

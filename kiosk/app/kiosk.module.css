@@ -248,6 +248,120 @@
   }
 }
 
+/* --- Complete screen: generating phase (stage-by-stage reveal) --- */
+
+/* The calm, human-facing line keyed to the current pipeline stage. The key
+   on the element (set in CompleteScreen) makes each stage fade in fresh. */
+.revealStage {
+  font-size: clamp(1.5rem, 3.5vw, 2.5rem);
+  font-weight: 300;
+  letter-spacing: -0.01em;
+  color: var(--accent);
+  min-height: 1.4em;
+  animation: fadeIn 600ms ease both;
+}
+
+/* A row of steps that fill as the pipeline advances — progression, not a
+   spinner. Past steps rest on the accent, the running step pulses, upcoming
+   steps sit dim. */
+.stageDots {
+  display: flex;
+  gap: 1rem;
+  align-items: center;
+}
+
+.stageDot {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: #1a1a1a;
+  transition:
+    background 500ms ease,
+    transform 500ms ease;
+}
+
+.stageDot[data-state="done"] {
+  background: var(--accent-dim);
+}
+
+.stageDot[data-state="active"] {
+  background: var(--accent);
+  animation: pulse 1.4s ease-in-out infinite;
+}
+
+/* --- Complete screen: reveal phase (portrait + QR) --- */
+
+.revealTitle {
+  font-size: clamp(1.75rem, 4vw, 3rem);
+  font-weight: 300;
+  letter-spacing: -0.01em;
+  color: var(--fg);
+}
+
+/* Portrait and QR side by side; stacks on a narrow/portrait display. */
+.revealLayout {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: clamp(1.5rem, 4vw, 3.5rem);
+  max-width: 100%;
+}
+
+@media (max-aspect-ratio: 1 / 1) {
+  .revealLayout {
+    flex-direction: column;
+    gap: 2rem;
+  }
+}
+
+/* The payoff: the portrait, given room, with a soft lift off the black. */
+.revealPortrait {
+  max-height: 64vh;
+  max-width: 64vw;
+  height: auto;
+  width: auto;
+  border-radius: 12px;
+  box-shadow: 0 12px 60px rgba(0, 0, 0, 0.7);
+  animation: revealIn 900ms ease both;
+}
+
+@keyframes revealIn {
+  from {
+    opacity: 0;
+    transform: scale(0.96);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+.revealQr {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.9rem;
+  animation: fadeIn 900ms ease 200ms both;
+}
+
+/* A light card behind the QR so it scans cleanly on the dark screen. */
+.revealQrImage {
+  width: clamp(150px, 18vw, 230px);
+  height: auto;
+  background: #ffffff;
+  padding: 14px;
+  border-radius: 10px;
+}
+
+.revealQrCaption {
+  font-size: clamp(0.95rem, 1.8vw, 1.25rem);
+  font-weight: 300;
+  letter-spacing: 0.02em;
+  color: var(--fg-dim);
+  max-width: 16ch;
+  text-align: center;
+}
+
 /* --- Error notice (calm, non-fatal) --- */
 
 .error {
