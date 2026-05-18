@@ -65,6 +65,34 @@ def _font(size: int) -> ImageFont.FreeTypeFont:
     return ImageFont.load_default(size=size)
 
 
+# Punctuation the LLM commonly produces that the bitmap-derived default font
+# has no glyph for — rendering them as tofu boxes. Mapped to ASCII-safe
+# equivalents so the portrait is always legible without bundling a font.
+_GLYPH_FALLBACKS = {
+    "—": " - ",   # em dash
+    "–": "-",     # en dash
+    "‘": "'",     # left single quote
+    "’": "'",     # right single quote / apostrophe
+    "“": '"',     # left double quote
+    "”": '"',     # right double quote
+    "…": "...",   # ellipsis
+    " ": " ",     # non-breaking space
+}
+
+
+def _sanitize(text: str) -> str:
+    """Replace non-ASCII punctuation the default font cannot render.
+
+    The default Pillow font lacks glyphs for em dashes, curly quotes, and
+    ellipses, which the interviewer/slot-filling LLMs produce freely. Left
+    unmapped these draw as missing-glyph boxes. Mapping to ASCII keeps every
+    portrait legible without sourcing, licensing, and bundling a TTF.
+    """
+    for bad, good in _GLYPH_FALLBACKS.items():
+        text = text.replace(bad, good)
+    return text
+
+
 def _wrap(
     draw: ImageDraw.ImageDraw,
     text: str,
@@ -76,7 +104,7 @@ def _wrap(
     A single word longer than ``max_width`` is hard-broken character-by-
     character so it can never overflow the region.
     """
-    words = (text or "").split()
+    words = _sanitize(text or "").split()
     if not words:
         return [""]
     lines: list[str] = []
