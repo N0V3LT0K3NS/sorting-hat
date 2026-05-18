@@ -150,6 +150,136 @@ def test_close_fires_once_when_routing_done() -> None:
 
 
 # ---------------------------------------------------------------------------
+# 1b. The bug fix — an EARLY / forced close still runs the offline pipeline
+# ---------------------------------------------------------------------------
+
+
+def test_finalize_on_close_runs_pipeline_when_routing_not_done(
+    sessions_dir, monkeypatch
+) -> None:
+    """An early End (routing_done False) still triggers the offline pipeline.
+
+    The bug: the per-turn ``_maybe_finalize`` only fires once the supervisor's
+    routing has settled. A visitor who presses End before then closes the
+    session with a transcript on disk but the pipeline never run. The
+    ``finalize_on_close`` shutdown callback closes that gap.
+    """
+    _mock_pipeline(monkeypatch)
+    from agent.main import wire_session_finalize
+
+    state = _peopled_state()
+    # An early end: base questions NOT complete, routing NOT settled. Wipe the
+    # natural-completion signal so routing_done is unambiguously False.
+    state.chosen_template = None
+    agent = InterviewerAgent(state=state)
+    assert agent.routing_done is False
+
+    session = FakeSession()
+    session.on = lambda event, cb: None  # type: ignore
+
+    finalize_on_close = wire_session_finalize(
+        session, agent, state, "sess-early-end"
+    )
+    asyncio.run(finalize_on_close())
+
+    # The session was closed and the pipeline ran on the thin transcript.
+    assert session.closed is True
+    folder = sessions_dir / "sess-early-end"
+    assert (folder / TRANSCRIPT_FILENAME).is_file()
+    assert (folder / CLASSIFICATION_FILENAME).is_file()
+    assert (folder / "portrait.png").is_file()
+    # status.json is written so the kiosk Complete screen resolves instead of
+    # timing out.
+    assert (folder / STATUS_FILENAME).is_file()
+    assert json.loads((folder / STATUS_FILENAME).read_text())["stage"] == "done"
+
+
+def test_finalize_on_close_writes_status_on_early_end(
+    sessions_dir, monkeypatch
+) -> None:
+    """An early end leaves a status.json — the kiosk Complete screen resolves."""
+    _mock_pipeline(monkeypatch)
+    from agent.main import wire_session_finalize
+
+    state = _peopled_state()
+    state.chosen_template = None
+    agent = InterviewerAgent(state=state)
+    session = FakeSession()
+    session.on = lambda event, cb: None  # type: ignore
+
+    finalize_on_close = wire_session_finalize(
+        session, agent, state, "sess-early-status"
+    )
+    asyncio.run(finalize_on_close())
+
+    status = json.loads(
+        (sessions_dir / "sess-early-status" / STATUS_FILENAME).read_text()
+    )
+    assert status["session_id"] == "sess-early-status"
+    # A terminal stage — the kiosk's poll resolves rather than timing out.
+    assert status["stage"] in {"done", "error"}
+
+
+def test_finalize_on_close_is_noop_after_natural_completion(
+    sessions_dir, monkeypatch
+) -> None:
+    """The pipeline never runs twice — the close callback shares the guard.
+
+    When a natural completion has already finalized the session, the
+    ``finalize_on_close`` shutdown callback must be a no-op: the offline
+    pipeline runs exactly once per session.
+    """
+    from agent.main import wire_session_finalize
+
+    pipeline_runs: list[str] = []
+
+    async def counting_finalize(session, session_id, state, **kwargs):
+        pipeline_runs.append(session_id)
+        await session.aclose()
+        return {"session_id": session_id}
+
+    monkeypatch.setattr("agent.main.finalize_session", counting_finalize)
+
+    # Routing settled — a natural completion.
+    state = _peopled_state()
+    agent = InterviewerAgent(state=state)
+    assert agent.routing_done is True
+
+    session = FakeSession()
+    captured: list = []
+    session.on = lambda event, cb: captured.append(cb)  # type: ignore
+
+    finalize_on_close = wire_session_finalize(
+        session, agent, state, "sess-no-double"
+    )
+    handler = captured[0]
+
+    class FakeItem:
+        def __init__(self, role: str, text: str) -> None:
+            self.role = role
+            self.text_content = text
+
+    class FakeEvent:
+        def __init__(self, item: object) -> None:
+            self.item = item
+
+    async def drive() -> None:
+        # A turn fires the natural-completion finalize (routing already done).
+        handler(FakeEvent(FakeItem("user", "An answer.")))
+        for _ in range(3):
+            await asyncio.sleep(0)
+        # The shutdown callback then runs — it must NOT finalize again.
+        await finalize_on_close()
+        for _ in range(3):
+            await asyncio.sleep(0)
+
+    asyncio.run(drive())
+
+    # Exactly one pipeline run, despite both seams firing.
+    assert pipeline_runs == ["sess-no-double"]
+
+
+# ---------------------------------------------------------------------------
 # 2. Transcript persistence
 # ---------------------------------------------------------------------------
 

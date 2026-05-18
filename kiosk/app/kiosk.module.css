@@ -185,34 +185,62 @@
 
 /* --- Active screen: exit affordance --- */
 
-/* Low-prominence by design: discoverable for someone who wants out, but
-   quiet enough not to invite an accidental press. */
-.endButton {
+/* The End button is state-aware (see ActiveScreen): hidden before the base
+   questions are done, then a quiet `.endButtonSoft` during the probe, then a
+   confident `.endButtonPrimary` once routing has settled. Both variants share
+   the same anchored pill shape below. */
+.endButtonSoft,
+.endButtonPrimary {
   position: absolute;
   bottom: 1.75rem;
   left: 50%;
   transform: translateX(-50%);
   font-size: clamp(0.85rem, 1.6vw, 1rem);
-  font-weight: 300;
   letter-spacing: 0.12em;
-  color: var(--fg-dim);
-  background: transparent;
-  border: 1px solid #1a1a1a;
   border-radius: 999px;
   padding: 0.5rem 1.5rem;
   cursor: pointer;
-  opacity: 0.5;
   transition:
     opacity 250ms ease,
     color 250ms ease,
+    background 250ms ease,
     border-color 250ms ease;
 }
 
-.endButton:hover,
-.endButton:focus-visible {
+/* Probing phase: base questions done, the probe still running. End is
+   allowed — a kiosk must never trap anyone — but signals "we have enough to
+   try, no need to rush". Low-prominence: discoverable, not inviting. */
+.endButtonSoft {
+  font-weight: 300;
+  color: var(--fg-dim);
+  background: transparent;
+  border: 1px solid #1a1a1a;
+  opacity: 0.5;
+}
+
+.endButtonSoft:hover,
+.endButtonSoft:focus-visible {
   opacity: 1;
   color: var(--fg);
   border-color: var(--fg-dim);
+  outline: none;
+}
+
+/* Routing complete: the interview has everything it needs. End is now the
+   confident primary affordance — a filled accent pill that says "you're
+   done, this is the way out". */
+.endButtonPrimary {
+  font-weight: 400;
+  color: var(--bg);
+  background: var(--accent);
+  border: 1px solid var(--accent);
+  opacity: 1;
+}
+
+.endButtonPrimary:hover,
+.endButtonPrimary:focus-visible {
+  background: var(--fg);
+  border-color: var(--fg);
   outline: none;
 }
 

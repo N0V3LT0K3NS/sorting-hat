@@ -301,7 +301,7 @@ def wire_session_finalize(
     agent: InterviewerAgent,
     state: InterviewState,
     session_id: str,
-) -> None:
+):
     """Wire FIX-3's three fixes onto a live session.
 
     Registers one handler on the session's ``conversation_item_added`` event
@@ -325,6 +325,20 @@ def wire_session_finalize(
     The handler is synchronous (LiveKit event callbacks are); the finalize
     coroutine is scheduled as a background task so the event callback returns
     immediately. A guard flag makes the close-and-finalize fire exactly once.
+
+    A second seam closes the bug behind an EARLY end. ``_maybe_finalize`` only
+    fires once the supervisor's routing has *naturally* settled. But a visitor
+    can press the kiosk's End button — or simply walk away — long before then.
+    That tears the session down with a transcript on disk but the offline
+    pipeline never run, so the kiosk's Complete screen polls a status.json
+    that never appears. :func:`finalize_session` is therefore *also* wired to
+    the job's shutdown via :func:`wire_finalize_on_close`, sharing the same
+    ``finalize_started`` guard so the pipeline runs exactly once whether the
+    interview ended naturally or early.
+
+    Returns an async ``finalize_on_close()`` callable. The entrypoint registers
+    it as the job's shutdown callback so the pipeline runs on an early/forced
+    close too; it is a no-op when a natural completion already finalized.
     """
     finalize_started = {"done": False}
     route_started = {"done": False}
@@ -352,6 +366,37 @@ def wire_session_finalize(
                 session_id,
             )
             asyncio.ensure_future(finalize_session(session, session_id, state))
+
+    async def finalize_on_close() -> None:
+        """Finalize the interview on an early/forced close (the bug fix).
+
+        Registered as the job's shutdown callback. ``_maybe_finalize`` only
+        fires once routing has *naturally* settled; this seam covers the case
+        a visitor pressed End — or walked away — before then. It shares the
+        ``finalize_started`` guard, so if a natural completion already
+        finalized this session, this is a no-op (the pipeline never runs
+        twice). Otherwise it runs :func:`finalize_session` on whatever
+        transcript exists — a thin portrait beats no portrait, and the
+        pipeline's own graceful degradation handles a short transcript.
+
+        Awaited (not scheduled): a shutdown callback must complete before the
+        job exits, or the pipeline would be killed mid-run.
+        """
+        if finalize_started["done"]:
+            return
+        finalize_started["done"] = True
+        logger.info(
+            "session %s: session closing before routing settled — "
+            "finalizing early and running the offline pipeline on the "
+            "transcript that exists",
+            session_id,
+        )
+        try:
+            await finalize_session(session, session_id, state)
+        except Exception as exc:  # a kiosk must shut down gracefully
+            logger.warning(
+                "session %s: early finalize failed (%s)", session_id, exc
+            )
 
     def _on_route_done(task: asyncio.Task) -> None:
         if task.cancelled():
@@ -399,6 +444,8 @@ def wire_session_finalize(
         _maybe_finalize()
 
     session.on("conversation_item_added", _on_conversation_item)
+
+    return finalize_on_close
 
 
 # ---------------------------------------------------------------------------
@@ -484,7 +531,17 @@ async def entrypoint(ctx: JobContext) -> None:
     # complete pipeline trigger before the session starts so the very first
     # turn is captured.
     session_id = ctx.room.name
-    wire_session_finalize(parts.session, agent, parts.state, session_id)
+    finalize_on_close = wire_session_finalize(
+        parts.session, agent, parts.state, session_id
+    )
+
+    # The bug fix: an interview that ends EARLY — the visitor presses the
+    # kiosk's End button, or walks away — never reaches `routing_done`, so the
+    # per-turn `_maybe_finalize` never fires and the offline pipeline never
+    # runs. Register `finalize_on_close` as the job's shutdown callback so the
+    # pipeline runs on *any* close. It shares the finalize guard with the
+    # natural-completion path, so the pipeline runs exactly once per session.
+    ctx.add_shutdown_callback(finalize_on_close)
 
     # FIX-4A: wire the realtime background classifier onto user turns so the
     # four signal weights on parts.state advance live as the person speaks —

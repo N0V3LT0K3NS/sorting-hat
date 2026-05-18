@@ -83,9 +83,22 @@ Test these **before** the happy path, so a calm failure is proven first.
 - [ ] The progress arc below the state label fills gently as the minutes
       pass, with an understated minute count beneath it — a calm sense of
       building, no countdown or pressure.
-- [ ] The unobtrusive _End_ control at the bottom centre ends the session:
-      pressing it advances to the Complete screen and the kiosk resets to
-      Idle, exactly as an agent-ended interview does.
+- [ ] The _End_ control is **state-aware** (it polls the delivery server's
+      `/live/<session-id>`):
+      - Early in the interview (before the base questions are done) there is
+        **no** End button — the interview lacks the material for a portrait.
+      - Once the base questions are done and the probe is running, a quiet
+        _End early_ pill appears at the bottom centre — discoverable, low
+        prominence, never trapping a visitor.
+      - Once routing has settled it becomes a confident filled _I'm done_
+        button.
+      Pressing End in either visible state advances to the Complete screen
+      and the kiosk resets to Idle, exactly as an agent-ended interview does.
+- [ ] **Early End still produces a portrait.** Press _End early_ during the
+      probe phase. The Complete screen still resolves to a portrait (a
+      thinner one — lower-confidence classification, no deep probe) rather
+      than timing out: the agent runs the offline pipeline on whatever
+      transcript exists, on *any* close.
 - [ ] (Dev only) Tap the hidden bottom-right hotspot — the developer
       transcript view toggles. Tap again to hide it. This is for field
       debugging only and is invisible to visitors.
