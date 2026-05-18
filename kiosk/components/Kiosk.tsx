@@ -33,8 +33,21 @@ interface Connection {
   roomName: string;
 }
 
-/** How long the Complete screen lingers before the kiosk resets to Idle. */
-const COMPLETE_DWELL_MS = 9_000;
+/**
+ * How long the Complete screen lingers *after* its reveal finishes (the
+ * portrait + QR are on screen, or a graceful error was shown) before the
+ * kiosk resets to Idle for the next visitor.
+ */
+const REVEAL_DWELL_MS = 45_000;
+
+/**
+ * How long the Complete screen lingers before the kiosk resets to Idle.
+ *
+ * Long enough for the full post-interview reveal: the portrait pipeline takes
+ * ~90 s–3 min, then the visitor needs a moment to scan the QR. The Complete
+ * screen drives its own dwell — see `CompleteScreen`'s `onReset` callback —
+ * rather than a blind timer, so a slow render is never cut off mid-reveal.
+ */
 
 /**
  * Audio-capture options — WebRTC noise/echo suppression as a baseline.
@@ -55,6 +68,12 @@ export function Kiosk() {
   const [connecting, setConnecting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [connection, setConnection] = useState<Connection | null>(null);
+  // The room name of the just-finished interview. The offline pipeline keys
+  // its session folder by the room name (see agent/main.py — `session_id =
+  // ctx.room.name`), so this is the id the Complete screen polls the delivery
+  // server with. Captured when the interview starts; held across the
+  // active->complete transition (which clears `connection`).
+  const [sessionId, setSessionId] = useState<string | null>(null);
   // Bumped on every reset — forces a full <LiveKitRoom> remount so no
   // connection state survives into the next visitor's session.
   const [sessionKey, setSessionKey] = useState(0);
@@ -69,6 +88,7 @@ export function Kiosk() {
   const resetToIdle = useCallback(() => {
     completed.current = false;
     setConnection(null);
+    setSessionId(null);
     setError(null);
     setConnecting(false);
     setPhase("idle");
@@ -108,6 +128,9 @@ export function Kiosk() {
       const data = (await res.json()) as Connection;
       completed.current = false;
       setConnection(data);
+      // The room name doubles as the pipeline's session id — capture it now
+      // so the Complete screen can poll the delivery server for this session.
+      setSessionId(data.roomName);
       setPhase("active");
     } catch {
       // Network failure, dev server down, etc. — calm, never a crash.
@@ -130,12 +153,13 @@ export function Kiosk() {
     setPhase("complete");
   }, []);
 
-  // While on the Complete screen, hold for a moment, then reset to Idle so
-  // the kiosk is ready for the next visitor with no attendant intervention.
-  useEffect(() => {
+  // The Complete screen runs a multi-minute reveal (poll the pipeline, show
+  // the portrait + QR). It owns its own pacing and calls `onRevealDone` once
+  // the reveal has landed — portrait shown, or a graceful error reached. We
+  // then hold briefly so a visitor can scan the QR, and reset to Idle.
+  const handleRevealDone = useCallback(() => {
     if (phase !== "complete") return;
-    const t = setTimeout(resetToIdle, COMPLETE_DWELL_MS);
-    return () => clearTimeout(t);
+    setTimeout(resetToIdle, REVEAL_DWELL_MS);
   }, [phase, resetToIdle]);
 
   return (
@@ -171,7 +195,12 @@ export function Kiosk() {
         </LiveKitRoom>
       )}
 
-      {phase === "complete" && <CompleteScreen />}
+      {phase === "complete" && (
+        <CompleteScreen
+          sessionId={sessionId}
+          onRevealDone={handleRevealDone}
+        />
+      )}
     </main>
   );
 }
