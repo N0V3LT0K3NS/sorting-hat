@@ -39,7 +39,10 @@ load_dotenv(override=False)
 # literals) and OpenRouter model slugs.
 
 # --- Job 5 · STT — Deepgram Flux, conversational STT with turn detection. ---
+# The Inference model string (deepgram/<model>) and, when a direct
+# DEEPGRAM_API_KEY is set, the bare model name fed to the direct plugin.
 DEFAULT_STT_MODEL = "deepgram/flux-general-en"
+DIRECT_STT_MODEL = "flux-general-en"
 
 # --- Job 6 · TTS — Inworld TTS 1.5-max (primary), Cartesia Sonic-3 (fallback).
 # Inworld leads blind-preference for emotional realism; Sonic-3 is the
@@ -53,6 +56,12 @@ FALLBACK_TTS_MODEL = "cartesia/sonic-3"
 # Provider routing sorts by latency — prefer the lowest-p50 endpoint.
 DEFAULT_LLM_MODEL = "anthropic/claude-haiku-4.5"
 FALLBACK_LLM_MODEL = "anthropic/claude-sonnet-4.6"
+
+# Cap on the interviewer LLM's reply length. The interviewer asks short
+# spoken follow-up questions and never monologues; an unbounded reply in a
+# real-time voice loop can starve the TTS pipeline. ~250 tokens is comfortably
+# above any single spoken question.
+INTERVIEWER_MAX_TOKENS = 250
 
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 
@@ -82,6 +91,12 @@ class Config:
     openrouter_api_key: str | None
     openrouter_base_url: str
 
+    # --- Deepgram (direct STT) ----------------------------------------------
+    # When present, STT talks straight to Deepgram's API via the direct
+    # livekit-plugins-deepgram plugin, bypassing LiveKit Inference and its
+    # rate limit. Absent -> STT falls back to the Inference path.
+    deepgram_api_key: str | None
+
     # --- Model selection ----------------------------------------------------
     # Each job carries its approved primary plus the fallback to swap to if
     # the primary is unavailable (Decision 0001). No circuit breaker — the
@@ -110,6 +125,16 @@ class Config:
     def has_openrouter(self) -> bool:
         """True when an OpenRouter API key is available for LLM calls."""
         return self.openrouter_api_key is not None
+
+    @property
+    def has_deepgram(self) -> bool:
+        """True when a direct Deepgram API key is available.
+
+        When True, STT is constructed with the direct livekit-plugins-deepgram
+        plugin (straight to Deepgram's API). When False, STT falls back to the
+        LiveKit Inference path — graceful degradation, nothing breaks.
+        """
+        return self.deepgram_api_key is not None
 
     def warn_missing(self) -> list[str]:
         """Log a clear warning for each disabled feature; return their names.
@@ -150,6 +175,7 @@ def load_config() -> Config:
         openrouter_api_key=_clean(os.getenv("OPENROUTER_API_KEY")),
         openrouter_base_url=_clean(os.getenv("OPENROUTER_BASE_URL"))
         or OPENROUTER_BASE_URL,
+        deepgram_api_key=_clean(os.getenv("DEEPGRAM_API_KEY")),
         stt_model=_clean(os.getenv("STT_MODEL")) or DEFAULT_STT_MODEL,
         tts_model=_clean(os.getenv("TTS_MODEL")) or DEFAULT_TTS_MODEL,
         tts_fallback_model=_clean(os.getenv("TTS_FALLBACK_MODEL"))

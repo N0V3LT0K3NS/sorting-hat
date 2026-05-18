@@ -53,10 +53,10 @@ from livekit.agents.voice import (
     AgentStateChangedEvent,
     UserStateChangedEvent,
 )
-from livekit.plugins import openai, silero
+from livekit.plugins import deepgram, openai, silero
 from livekit.plugins.turn_detector.english import EnglishModel
 
-from agent.config import Config, load_config
+from agent.config import INTERVIEWER_MAX_TOKENS, DIRECT_STT_MODEL, Config, load_config
 from agent.interviewer import InterviewerAgent
 from agent.state import InterviewState
 
@@ -113,6 +113,9 @@ def build_llm(cfg: Config) -> openai.LLM:
       so OpenRouter routes to it if the primary is unavailable;
     * ``provider={"sort": "latency"}`` — prefer the lowest-p50 endpoint, the
       metric that matters for the sub-800ms voice budget;
+    * ``max_tokens=INTERVIEWER_MAX_TOKENS`` — the interviewer asks short
+      spoken follow-ups; an unbounded reply in a real-time voice loop can
+      starve the TTS pipeline, so the reply length is capped;
     * reasoning is left OFF — ``reasoning_effort`` is intentionally not set,
       so no reasoning parameter is sent. The in-call job is bounded (persona
       + ordered questions + warm follow-ups), not frontier reasoning.
@@ -126,13 +129,48 @@ def build_llm(cfg: Config) -> openai.LLM:
     # non-functional placeholder when none is configured. No network call is
     # made at construction time; --dry-run never reaches a live request.
     api_key = cfg.openrouter_api_key or "missing-openrouter-key"
-    return openai.LLM.with_openrouter(
+    llm = openai.LLM.with_openrouter(
         model=cfg.llm_model,
         api_key=api_key,
         base_url=cfg.openrouter_base_url,
         app_name="sorting-hat",
         fallback_models=[cfg.llm_fallback_model],
         provider={"sort": "latency"},
+    )
+    # Cap the reply length. with_openrouter() does not expose max_tokens, so
+    # the cap is applied to the constructed LLM's options (sent as
+    # max_completion_tokens on every chat() request). Keeps spoken follow-ups
+    # short and stops an unbounded reply starving the TTS pipeline.
+    llm._opts.max_completion_tokens = INTERVIEWER_MAX_TOKENS
+    return llm
+
+
+def build_stt(cfg: Config):
+    """Construct the STT (Job 5), picking the provider route from config.
+
+    Two routes, decided by whether a direct ``DEEPGRAM_API_KEY`` is present:
+
+    * **direct Deepgram** (``cfg.has_deepgram``) — the direct
+      ``livekit-plugins-deepgram`` plugin's ``STTv2``, the Flux v2 endpoint.
+      It talks straight to Deepgram's API, bypassing LiveKit Inference and its
+      rate limit (the 429 that closed a live session is what this avoids).
+    * **LiveKit Inference** — the bundled gateway behind the ``LIVEKIT`` key,
+      the existing path. Used whenever no direct key is configured so a
+      deployment without one still works.
+
+    No network call is made at construction time; ``--dry-run`` never reaches
+    a live request.
+    """
+    if cfg.has_deepgram:
+        # STTv2 is the Flux conversational model (wss://api.deepgram.com/v2).
+        return deepgram.STTv2(model=DIRECT_STT_MODEL, api_key=cfg.deepgram_api_key)
+
+    livekit_key = cfg.livekit_api_key or "missing-livekit-key"
+    livekit_secret = cfg.livekit_api_secret or "missing-livekit-secret"
+    return inference.STT(
+        model=cfg.stt_model,
+        api_key=livekit_key,
+        api_secret=livekit_secret,
     )
 
 
@@ -154,18 +192,20 @@ def build_session(cfg: Config) -> SessionParts:
     # interruption classifier and the native turn detector build on.
     vad = silero.VAD.load()
 
-    # LiveKit Inference STT/TTS — Deepgram Flux STT, Cartesia Sonic-3 TTS,
-    # both behind the single LIVEKIT key. Constructed explicitly (rather than
-    # passed as bare model strings) so a placeholder key can stand in when
-    # LIVEKIT_API_KEY is absent — graceful degradation; no network call is
-    # made at construction time.
+    # LiveKit credentials, with placeholders so wiring still validates when
+    # they are absent — graceful degradation; no network call is made at
+    # construction time.
     livekit_key = cfg.livekit_api_key or "missing-livekit-key"
     livekit_secret = cfg.livekit_api_secret or "missing-livekit-secret"
-    stt = inference.STT(
-        model=cfg.stt_model,
-        api_key=livekit_key,
-        api_secret=livekit_secret,
-    )
+
+    # STT — Deepgram Flux. With a direct DEEPGRAM_API_KEY, use the direct
+    # livekit-plugins-deepgram plugin (STTv2 = the Flux v2 endpoint), which
+    # talks straight to Deepgram's API and bypasses LiveKit Inference and its
+    # rate limit. Without one, fall back to the Inference path so a deployment
+    # with no direct key still works.
+    stt = build_stt(cfg)
+
+    # TTS — Inworld via LiveKit Inference, behind the single LIVEKIT key.
     tts = inference.TTS(
         model=cfg.tts_model,
         api_key=livekit_key,
@@ -308,8 +348,24 @@ def run_dry_run() -> int:
         cfg.llm_fallback_model,
         cfg.sessions_dir,
     )
+    # STT provider route — direct Deepgram when a direct key is configured,
+    # else LiveKit Inference. This is the fix for the 429 that closed a live
+    # session: the direct plugin bypasses Inference's rate limit.
+    if cfg.has_deepgram:
+        logger.info(
+            "STT path: DIRECT Deepgram plugin (STTv2 Flux, model=%s) — "
+            "bypasses LiveKit Inference and its rate limit",
+            DIRECT_STT_MODEL,
+        )
+    else:
+        logger.info(
+            "STT path: LiveKit Inference (model=%s) — no DEEPGRAM_API_KEY set",
+            cfg.stt_model,
+        )
     logger.info(
-        "interviewer LLM (Job 1): provider routing sort=latency, reasoning OFF"
+        "interviewer LLM (Job 1): provider routing sort=latency, "
+        "reasoning OFF, max_tokens=%d",
+        INTERVIEWER_MAX_TOKENS,
     )
     if missing:
         logger.info(
