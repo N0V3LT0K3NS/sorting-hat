@@ -32,6 +32,7 @@ from agent.interviewer import (
 )
 from agent.session_finalize import (
     CLASSIFICATION_FILENAME,
+    LIVE_STATE_FILENAME,
     RESULT_FILENAME,
     STATE_FILENAME,
     STATUS_FILENAME,
@@ -40,6 +41,7 @@ from agent.session_finalize import (
     persist_transcript,
     run_offline_pipeline,
     session_dir,
+    write_live_state,
     write_status,
 )
 from agent.state import IcebergResult, InterviewState
@@ -528,3 +530,109 @@ def test_empty_transcript_writes_error_status(sessions_dir) -> None:
     status = _read_status(sessions_dir / "sess-st-empty")
     assert status["stage"] == "error"
     assert "empty transcript" in (status["error"] or "")
+
+
+# ---------------------------------------------------------------------------
+# 6. live_state.json — the delivery server's during-interview state file
+# ---------------------------------------------------------------------------
+
+
+def _read_live_state(folder) -> dict:
+    return json.loads((folder / LIVE_STATE_FILENAME).read_text())
+
+
+def test_write_live_state_base_questions_phase(sessions_dir) -> None:
+    """Mid base interview: phase 'base_questions', signals + counts surfaced."""
+    state = InterviewState(
+        iceberg_signal=0.7, two_buttons_signal=0.2, base_questions_completed=2
+    )
+    state.record_turn("interviewer", "Question one.")
+    state.record_turn("interviewee", "Answer one.")
+
+    write_live_state("sess-live-base", state, sessions_dir=sessions_dir)
+    live = _read_live_state(sessions_dir / "sess-live-base")
+
+    assert live["session_id"] == "sess-live-base"
+    assert live["phase"] == "base_questions"
+    assert live["base_questions_completed"] == 2
+    assert live["base_questions_total"] == BASE_QUESTION_COUNT
+    assert live["signals"]["iceberg"] == 0.7
+    assert live["signals"]["two_buttons"] == 0.2
+    assert live["leading_template"] == "iceberg"
+    assert live["chosen_template"] is None
+    assert live["routing_done"] is False
+    assert live["turn_count"] == 2
+    assert live["updated_at"]
+
+
+def test_write_live_state_probing_phase(sessions_dir) -> None:
+    """Base questions done, routing not settled -> phase 'probing'."""
+    state = InterviewState(
+        compass_signal=0.5, base_questions_completed=BASE_QUESTION_COUNT
+    )
+    write_live_state("sess-live-probe", state, sessions_dir=sessions_dir)
+    live = _read_live_state(sessions_dir / "sess-live-probe")
+    assert live["phase"] == "probing"
+    assert live["routing_done"] is False
+
+
+def test_write_live_state_complete_phase(sessions_dir) -> None:
+    """routing_done -> phase 'complete', chosen_template carried through."""
+    state = InterviewState(
+        arc_signal=0.9, base_questions_completed=BASE_QUESTION_COUNT
+    )
+    state.chosen_template = "arc"
+    write_live_state(
+        "sess-live-done", state, routing_done=True, sessions_dir=sessions_dir
+    )
+    live = _read_live_state(sessions_dir / "sess-live-done")
+    assert live["phase"] == "complete"
+    assert live["routing_done"] is True
+    assert live["chosen_template"] == "arc"
+
+
+def test_write_live_state_is_idempotent_rewrite(sessions_dir) -> None:
+    """Calling write_live_state again reflects the latest mutated state."""
+    state = InterviewState(iceberg_signal=0.1)
+    write_live_state("sess-live-rw", state, sessions_dir=sessions_dir)
+    first = _read_live_state(sessions_dir / "sess-live-rw")
+    assert first["signals"]["iceberg"] == 0.1
+
+    state.iceberg_signal = 0.8
+    state.base_questions_completed = 3
+    write_live_state("sess-live-rw", state, sessions_dir=sessions_dir)
+    second = _read_live_state(sessions_dir / "sess-live-rw")
+    assert second["signals"]["iceberg"] == 0.8
+    assert second["base_questions_completed"] == 3
+
+
+def test_wired_hook_writes_live_state_each_turn(sessions_dir) -> None:
+    """The worker's per-turn hook writes live_state.json with the right shape."""
+    from agent.main import wire_session_finalize
+
+    state = InterviewState(two_buttons_signal=0.6)
+    agent = InterviewerAgent(state=state)
+    session = FakeSession()
+    captured: list = []
+    session.on = lambda event, cb: captured.append(cb)  # type: ignore
+
+    wire_session_finalize(session, agent, state, "sess-live-wired")
+    handler = captured[0]
+
+    class FakeItem:
+        def __init__(self, role: str, text: str) -> None:
+            self.role = role
+            self.text_content = text
+
+    class FakeEvent:
+        def __init__(self, item: object) -> None:
+            self.item = item
+
+    handler(FakeEvent(FakeItem("assistant", "An interviewer question.")))
+    handler(FakeEvent(FakeItem("user", "An interviewee answer.")))
+
+    live = _read_live_state(sessions_dir / "sess-live-wired")
+    assert live["phase"] == "base_questions"
+    assert live["signals"]["two_buttons"] == 0.6
+    assert live["turn_count"] == 2
+    assert live["base_questions_total"] == BASE_QUESTION_COUNT

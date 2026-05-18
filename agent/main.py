@@ -59,7 +59,11 @@ from livekit.plugins.turn_detector.english import EnglishModel
 
 from agent.config import INTERVIEWER_MAX_TOKENS, DIRECT_STT_MODEL, Config, load_config
 from agent.interviewer import INTERVIEWEE_ROLE, INTERVIEWER_ROLE, InterviewerAgent
-from agent.session_finalize import finalize_session, persist_transcript
+from agent.session_finalize import (
+    finalize_session,
+    persist_transcript,
+    write_live_state,
+)
 from agent.state import InterviewState
 
 logging.basicConfig(level=logging.INFO)
@@ -330,6 +334,14 @@ def wire_session_finalize(
             persist_transcript(session_id, state)
         except Exception as exc:  # never let persistence crash the session
             logger.warning("incremental transcript persist failed: %s", exc)
+        # Live-state file — the during-interview counterpart of status.json.
+        # The kiosk's GET /live/<id> endpoint reads it to visualise the
+        # classifier and gate the End button on interview progress. A separate
+        # try/except so a live-state write failure never blocks the transcript.
+        try:
+            write_live_state(session_id, state, routing_done=agent.routing_done)
+        except Exception as exc:  # never let the live-state write crash the session
+            logger.warning("incremental live-state write failed: %s", exc)
 
     def _maybe_finalize() -> None:
         if agent.routing_done and not finalize_started["done"]:

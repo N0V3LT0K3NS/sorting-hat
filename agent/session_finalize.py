@@ -27,6 +27,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -47,6 +48,12 @@ RESULT_FILENAME = "result.json"
 # show a stage-by-stage reveal; run_offline_pipeline rewrites it at each stage
 # boundary. See delivery/server.py.
 STATUS_FILENAME = "status.json"
+
+# Live-interview state file. Written each turn (alongside the transcript) so
+# the delivery server's GET /live/<id> endpoint can expose the classifier's
+# signal weights and the interview's progress while the interview is still
+# running. The POST-interview counterpart of status.json. See delivery/server.py.
+LIVE_STATE_FILENAME = "live_state.json"
 
 
 # ---------------------------------------------------------------------------
@@ -129,6 +136,74 @@ def persist_transcript(
         folder,
     )
     return folder
+
+
+# ---------------------------------------------------------------------------
+# Live-interview state file
+# ---------------------------------------------------------------------------
+
+
+def write_live_state(
+    session_id: str,
+    state: InterviewState,
+    *,
+    routing_done: bool = False,
+    sessions_dir: Optional[Path] = None,
+) -> Path:
+    """Write/overwrite ``sessions/<session_id>/live_state.json`` for the kiosk.
+
+    The LIVE (during-interview) counterpart of :func:`write_status`. Called
+    after every turn — alongside :func:`persist_transcript` — so the delivery
+    server's ``GET /live/<session-id>`` endpoint can expose the background
+    classifier's four signal weights and the interview's progress in real time.
+
+    ``routing_done`` is the supervisor's authoritative routing-settled flag (it
+    lives on the :class:`~agent.interviewer.InterviewerAgent`, not on
+    :class:`InterviewState`); the caller passes it in. The phase is derived:
+    ``base_questions`` until the base questions are done, ``probing`` once they
+    are done but routing has not settled, ``complete`` once ``routing_done``.
+
+    A plain, idempotent rewrite — no DB, no streaming infra; the kiosk just
+    polls the file. Returns the live_state.json path.
+    """
+    # BASE_QUESTION_COUNT is the interview's base-question total. Imported here,
+    # not at module load, so importing this module never drags in the agent
+    # package's LiveKit dependency.
+    from agent.interviewer import BASE_QUESTION_COUNT
+
+    folder = session_dir(session_id, sessions_dir)
+
+    base_done = state.base_questions_completed >= BASE_QUESTION_COUNT
+    if routing_done:
+        phase = "complete"
+    elif base_done:
+        phase = "probing"
+    else:
+        phase = "base_questions"
+
+    live: dict = {
+        "session_id": str(session_id),
+        "phase": phase,
+        "base_questions_completed": state.base_questions_completed,
+        "base_questions_total": BASE_QUESTION_COUNT,
+        "signals": state.signal_weights(),
+        "leading_template": state.leading_template(),
+        "chosen_template": state.chosen_template,
+        "routing_done": bool(routing_done),
+        "turn_count": len(state.transcript_log),
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    (folder / LIVE_STATE_FILENAME).write_text(
+        json.dumps(live, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    logger.debug(
+        "session %s: live_state -> phase=%s turns=%d",
+        session_id,
+        phase,
+        live["turn_count"],
+    )
+    return folder / LIVE_STATE_FILENAME
 
 
 # ---------------------------------------------------------------------------
@@ -411,6 +486,7 @@ __all__ = [
     "sessions_root",
     "session_dir",
     "persist_transcript",
+    "write_live_state",
     "write_status",
     "run_offline_pipeline",
     "finalize_session",
@@ -419,4 +495,5 @@ __all__ = [
     "CLASSIFICATION_FILENAME",
     "RESULT_FILENAME",
     "STATUS_FILENAME",
+    "LIVE_STATE_FILENAME",
 ]
