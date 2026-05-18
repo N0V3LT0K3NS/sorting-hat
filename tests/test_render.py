@@ -232,3 +232,26 @@ def test_render_rejects_plain_dict():
     """A dict is not a typed result model and is rejected."""
     with pytest.raises(RenderError):
         render({"surface": "x", "first_layer": "y"})
+
+
+def test_sanitize_replaces_tofu_punctuation():
+    """Em dashes and curly quotes are mapped to ASCII the default font has."""
+    from pipeline.render import _sanitize
+
+    out = _sanitize("a—b “quote” ‘x’ dots…")
+    assert "—" not in out and "“" not in out and "‘" not in out
+    assert "…" not in out
+    assert out.isascii()
+
+
+def test_render_with_em_dash_text_succeeds():
+    """A render whose slot text contains em dashes produces a valid PNG."""
+    result = TwoButtonsResult(
+        button_a_label="Build — alone",
+        button_a_seduction="Be the decision-maker — on your own terms.",
+        button_b_label="Stay — paid",
+        button_b_seduction="Keep the money — the “safe” life.",
+        impossibility="Each path forecloses the other — and time is short.",
+    )
+    img = render(result)
+    assert img.size == (WIDTH, HEIGHT)

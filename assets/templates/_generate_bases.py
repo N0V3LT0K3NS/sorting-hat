@@ -111,16 +111,11 @@ def make_two_buttons() -> Image.Image:
             width=5,
         )
 
-    # Figure area — a neutral panel where the deciding figure would sit.
+    # Figure area — a neutral panel beneath the buttons. The renderer draws
+    # the two seduction captions into this band, so it carries no baked-in
+    # label of its own (a placeholder label here collided with that text).
     fig_top = btn_y + btn_h + 60
     draw.rectangle([0, fig_top, WIDTH, panel_bottom], fill=(224, 224, 220))
-    _centred(
-        draw,
-        (WIDTH // 2, fig_top + (panel_bottom - fig_top) // 2 - 24),
-        "( deciding )",
-        _font(40),
-        (150, 150, 146),
-    )
 
     # Caption strip across the bottom half.
     draw.rectangle([0, panel_bottom, WIDTH, HEIGHT], fill=(20, 20, 22))
