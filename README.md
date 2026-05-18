@@ -44,9 +44,14 @@ truthful portrait?**
   shared state; a background classifier via the observer pattern.
 - **Offline analysis** — four decoupled, independently testable functions:
   `classify` -> `fill` -> `render` -> `deliver`. Not in LiveKit.
-- **Kiosk** — a minimal Next.js frontend: Idle / Active / Complete.
+- **Delivery server** — a small local web server (`delivery/`) that serves
+  the finished portrait, exposes interview progress so the kiosk can show a
+  reveal, and hosts the QR target for the visitor's phone.
+- **Kiosk** — a minimal Next.js frontend: Idle / Active / Complete, plus a
+  `/dev` dashboard listing every interview the machine has run.
 
 All LLM calls route through OpenRouter; STT/TTS through LiveKit Inference.
+Renders go through OpenAI `gpt-image-2`.
 
 See [`docs/GOALS.md`](docs/GOALS.md) for the full build plan.
 
@@ -64,15 +69,59 @@ Missing API keys disable the dependent feature; they never block the build.
 
 ---
 
+## Running the kiosk
+
+The kiosk is **three processes** on one machine. Start them in this order.
+
+**1. Wire the delivery-server URL to the machine's LAN IP.** The kiosk
+browser and the visitor's phone both reach the delivery server over the
+local network, so it must be the LAN IP — not `localhost`. Find the IP
+(`ipconfig getifaddr en0` on macOS), then set it in both env files:
+
+```sh
+# sorting-hat/.env
+DELIVERY_SERVER_URL=http://<LAN-IP>:8808
+# sorting-hat/kiosk/.env.local
+NEXT_PUBLIC_DELIVERY_SERVER_URL=http://<LAN-IP>:8808
+```
+
+**2. Start the three processes** (separate terminals):
+
+```sh
+# delivery server — serves portraits + interview-progress status
+uv run python -m delivery.server
+
+# agent worker — the LiveKit voice interviewer
+uv run python -m agent.main dev
+
+# kiosk frontend
+cd kiosk && npm install && npm run dev
+```
+
+**3. Open the kiosk** at `http://localhost:3000`. Press begin, allow the
+microphone, and have the interview. When it ends, the screen shows a
+stage-by-stage reveal (~1–3 min while the portrait renders), then the
+portrait with a QR code to take it to a phone.
+
+**Operator view:** `http://localhost:3000/dev` — a dashboard of every
+interview the machine has run: live signal state for an active interview,
+and the full record (transcript, classification, portrait) for past ones.
+
+**Where interviews are stored:** `sessions/<session-id>/` — local to this
+machine, gitignored. Nothing is uploaded.
+
+---
+
 ## Layout
 
 ```
 agent/                 LiveKit interview agent (interviewer + probe tasks)
 pipeline/              Offline analysis: classify, fill, render, deliver
+delivery/              Local web server: serves portraits + progress status
 prompts/               Persona prompt, probe prompts, analysis prompts
-kiosk/                 Next.js kiosk frontend
-assets/templates/      The four base meme images
+kiosk/                 Next.js kiosk frontend (interview flow + /dev dashboard)
+assets/templates/      Meme base images (reference/ holds the real templates)
 tests/                 Unit tests + the scripted-persona test harness
 docs/                  GOALS.md ledger, borrowed-craft notes
-sessions/              Per-session output (gitignored)
+sessions/              Per-session output — transcripts, portraits (gitignored)
 ```
