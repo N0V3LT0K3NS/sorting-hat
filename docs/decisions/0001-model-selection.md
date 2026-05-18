@@ -74,22 +74,32 @@ different requirements, so they should not all use the same model.
 ## The three challenges, and what research found
 
 ### Challenge 1 — "What about `gpt-realtime-2`?"
-**Real.** Released 2026-05-11 — GPT-5-class reasoning, speech-to-speech.
-**But the wrong architecture here.** A speech-to-speech model emits no
-reliable interim transcripts (user transcriptions arrive delayed, often
-after the agent has replied). sorting-hat's offline pipeline depends on a
-clean transcript, and the supervisor routes on what the user just said.
-LiveKit's own docs steer structured agent logic (ordered questions, typed
-sub-task probes, persona adherence) to the cascaded STT→LLM→TTS pipeline.
-Also expensive ($32/$64 per 1M audio tokens). **Verdict: keep the pipeline.**
+**Real.** Announced 2026-05-07 — GPT-5-class reasoning, speech-to-speech.
+**But the wrong architecture here.** A speech-to-speech realtime model
+*does* emit transcription events, but with async-timing caveats: the
+user-audio transcript is produced asynchronously and can arrive after the
+model has already responded, so it is not a reliable *interim* transcript
+for turn-by-turn routing. sorting-hat's supervisor routes on what the user
+just said, and the offline pipeline depends on a clean ordered transcript;
+the cascaded pipeline gives both directly. LiveKit's own docs also steer
+structured agent logic (ordered questions, typed sub-task probes, persona
+adherence) to the cascaded STT→LLM→TTS pipeline. Realtime audio is also
+expensive ($32/$64 per 1M audio tokens). **Verdict: keep the pipeline** —
+not because realtime is incapable, but because the cascade is the better
+fit for this app's structured, transcript-dependent design.
 
 ### Challenge 2 — "What about GLM-5.1?"
-**Real, and it changes the offline recommendation.** `z-ai/glm-5.1` on
-OpenRouter at ~$0.98/$3.08 per 1M — ~5× cheaper than Opus 4.7, and #1 on
-SWE-Bench Pro. Moved into the offline classification job as primary.
-Caveat: its proven strength is long-horizon reasoning, not the vivid-prose
-register slot-filling needs — so for Job 4 it is the A/B challenger, not
-the assumed winner. **The operator's instinct was correct.**
+**Real, and worth including — as a challenger, not the primary.** `z-ai/glm-5.1`
+on OpenRouter at ~$0.98/$3.08 per 1M — ~5× cheaper than Opus 4.7, and #1
+on SWE-Bench Pro. The v1 draft made it the offline-classification primary
+on cost; review (Amendment A) corrected that — the once-per-session
+authoritative sort optimizes for accuracy, not cost. GLM-5.1 is therefore
+the **challenger** for both offline jobs (3 and 4), promoted to primary
+only if the G17 harness shows accuracy parity on real transcripts. Its
+proven strength is long-horizon reasoning, not the vivid-prose register
+slot-filling needs — another reason it earns its place by measured output,
+not assumption. **The operator's instinct — that GLM belongs in the
+picture — was correct; review placed it correctly.**
 
 ### Challenge 3 — "Why Haiku, not faster/smarter Sonnet?"
 **There is no Sonnet 4.7** (current Sonnet is 4.6; a 4.8 is rumored,
@@ -169,12 +179,51 @@ in this PR — it is the decision record only.
 
 ## Sources (research, 2026-05-17)
 
-- OpenAI — Advancing voice intelligence with new models in the API
-- LiveKit Docs — Realtime models overview; Voice Agent Architecture;
-  Multi-Agent Handoffs
-- OpenRouter — GLM-5.1, Anthropic models, Provider Routing docs
-- Anthropic — Claude Sonnet 4.6; Claude release notes
-- Artificial Analysis — Claude 4.5 Haiku / Sonnet 4.6 provider latency
-- Inworld 2026 TTS benchmarks; Cekura best-TTS-for-voice-agents 2026
-- Deepgram — Introducing Flux; Flux configuration
+Model facts in this doc change fast — every claim is linked to a primary
+or dated secondary source so a future reviewer can re-verify.
+
+**OpenAI realtime (Challenge 1)**
+- OpenAI — Advancing voice intelligence with new models in the API:
+  https://openai.com/index/advancing-voice-intelligence-with-new-models-in-the-api/
+- TechCrunch — OpenAI launches new voice intelligence features (2026-05-07):
+  https://techcrunch.com/2026/05/07/openai-launches-new-voice-intelligence-features-in-its-api/
+
+**LiveKit — pipeline vs realtime, voice architecture**
+- LiveKit Docs — Realtime models overview:
+  https://docs.livekit.io/agents/models/realtime/
+- LiveKit — Voice Agent Architecture: STT/LLM/TTS pipelines explained:
+  https://livekit.com/blog/voice-agent-architecture-stt-llm-tts-pipelines-explained
+- LiveKit Docs — Workflows / Multi-Agent Handoffs:
+  https://docs.livekit.io/agents/build/workflows/
+
+**LLMs — OpenRouter, Anthropic, GLM-5.1**
+- OpenRouter — GLM-5.1: https://openrouter.ai/z-ai/glm-5.1
+- OpenRouter — Provider Routing docs:
+  https://openrouter.ai/docs/features/provider-routing
+- OpenRouter — Anthropic models: https://openrouter.ai/anthropic
+- Anthropic — Claude Sonnet 4.6: https://www.anthropic.com/news/claude-sonnet-4-6
+- Anthropic — Claude release notes:
+  https://support.claude.com/en/articles/12138966-release-notes
+- Artificial Analysis — Claude 4.5 Haiku provider latency:
+  https://artificialanalysis.ai/models/claude-4-5-haiku/providers
+- Artificial Analysis — Claude Sonnet 4.6 provider latency:
+  https://artificialanalysis.ai/models/claude-sonnet-4-6/providers
+
+**STT / TTS**
+- LiveKit Docs — STT models: https://docs.livekit.io/agents/models/stt/
+- LiveKit Docs — TTS models: https://docs.livekit.io/agents/models/tts/
+- Deepgram — Introducing Flux:
+  https://deepgram.com/learn/introducing-flux-conversational-speech-recognition
+- Deepgram — Flux configuration:
+  https://developers.deepgram.com/docs/flux/configuration
+- Inworld — 2026 TTS benchmarks:
+  https://inworld.ai/resources/best-voice-ai-tts-apis-for-real-time-voice-agents-2026-benchmarks
+- Cekura — Best TTS for voice agents 2026:
+  https://www.cekura.ai/blogs/best-tts-for-ai-voice-agents
+
+**Voice-agent LLM latency**
+- Daily.co — Benchmarking LLMs for voice-agent use cases:
+  https://www.daily.co/blog/benchmarking-llms-for-voice-agent-use-cases/
+- Softcery — Choosing an LLM for voice agents:
+  https://softcery.com/lab/ai-voice-agents-choosing-the-right-llm
 - Daily.co / Softcery — benchmarking LLMs for voice-agent use cases
