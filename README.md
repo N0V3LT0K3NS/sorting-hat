@@ -120,6 +120,39 @@ machine, gitignored. Nothing is uploaded.
 
 ---
 
+## Monitoring from a second machine
+
+The operator dashboard can run on a **different machine on the same wifi**
+than the kiosk — e.g. watch interviews from a laptop across the room. The
+monitoring machine installs nothing; it is just a browser.
+
+**On the kiosk machine** — start the kiosk frontend with the LAN script
+instead of `npm run dev`, so its web server accepts connections from other
+machines on the network:
+
+```sh
+cd kiosk && npm run dev:lan      # = next dev -H 0.0.0.0
+```
+
+The delivery server and agent worker start exactly as in "Running the
+kiosk" above — they already bind the network.
+
+**On the monitoring machine** — open a browser to the kiosk machine's LAN
+IP (`ipconfig getifaddr en0` on the kiosk machine), at port 3000:
+
+```
+http://<kiosk-machine-LAN-IP>:3000/dev
+```
+
+That's the full dashboard for the kiosk machine's interviews — live signal
+state for an active interview, the complete record for past ones.
+
+Requires a wifi that allows device-to-device traffic (no "client
+isolation"). Quick check: from the monitoring machine, load
+`http://<kiosk-LAN-IP>:3000` — if it loads, `/dev` will too.
+
+---
+
 ## Layout
 
 ```
