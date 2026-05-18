@@ -5,6 +5,9 @@ import "./globals.css";
 export const metadata: Metadata = {
   title: "sorting-hat",
   description: "A voice conversation that draws the shape of you.",
+  icons: {
+    icon: "/icon.svg",
+  },
 };
 
 export const viewport: Viewport = {
