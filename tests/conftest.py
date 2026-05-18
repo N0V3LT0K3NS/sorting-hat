@@ -13,6 +13,7 @@ event loop, so probe tasks construct cleanly regardless of test order.
 from __future__ import annotations
 
 import asyncio
+import socket
 
 import pytest
 
@@ -38,3 +39,38 @@ def _ensure_event_loop():
     if created:
         loop.close()
         asyncio.set_event_loop(None)
+
+
+@pytest.fixture(autouse=True)
+def _block_live_ai_provider_http(monkeypatch):
+    """Fail fast if a test tries to reach paid live AI provider APIs."""
+    blocked_hosts = {
+        "api.openai.com",
+        "generativelanguage.googleapis.com",
+        "openrouter.ai",
+    }
+    original_getaddrinfo = socket.getaddrinfo
+    original_create_connection = socket.create_connection
+
+    def _normalize_host(host):
+        if isinstance(host, bytes):
+            host = host.decode("ascii", errors="ignore")
+        return str(host).rstrip(".").lower()
+
+    def _assert_not_blocked(host):
+        if _normalize_host(host) in blocked_hosts:
+            raise RuntimeError(
+                f"Blocked live AI provider network call during tests: {host}"
+            )
+
+    def guarded_getaddrinfo(host, *args, **kwargs):
+        _assert_not_blocked(host)
+        return original_getaddrinfo(host, *args, **kwargs)
+
+    def guarded_create_connection(address, *args, **kwargs):
+        host, _port = address
+        _assert_not_blocked(host)
+        return original_create_connection(address, *args, **kwargs)
+
+    monkeypatch.setattr(socket, "getaddrinfo", guarded_getaddrinfo)
+    monkeypatch.setattr(socket, "create_connection", guarded_create_connection)
