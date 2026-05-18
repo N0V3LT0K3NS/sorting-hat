@@ -133,9 +133,15 @@ def test_config_module_imports_without_env(clean_env: None) -> None:
     import agent.config as config_mod
 
     # A fresh import exercises the module-level load_config() singleton.
+    # It must reload cleanly and yield a usable Config. We do NOT assert on
+    # has_livekit here: load_config() calls load_dotenv(), which reads the
+    # on-disk .env — so the result depends on whether a real .env exists on
+    # the machine. Graceful degradation on genuinely-absent credentials is
+    # covered by test_partial_livekit_credentials_degrade_gracefully and
+    # test_blank_env_var_is_treated_as_missing.
     reloaded = importlib.reload(config_mod)
     assert reloaded.config is not None
-    assert reloaded.config.has_livekit is False
+    assert isinstance(reloaded.config.has_livekit, bool)
 
 
 def test_blank_env_var_is_treated_as_missing(
