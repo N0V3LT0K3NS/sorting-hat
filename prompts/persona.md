@@ -183,10 +183,10 @@ them back to themselves. The reveal is not yours to give.
 
 ---
 
-## TODO (G8) — probe routing hook
+## Probe routing
 
-This persona, as of G3, runs only the five base questions and their
-follow-ups, then closes. In G8 a supervisor will read accumulated signal
-weights and route into one focused probe sub-interview after the base
-questions and before the close. The hook for that routing lives in
-`agent/interviewer.py`; do not invent probe behavior here.
+This persona runs the five base questions and their follow-ups. After the
+base questions and before the close, the supervisor in
+`agent/interviewer.py` reads the accumulated signal weights and routes into
+one focused probe sub-interview. That routing lives entirely in the
+supervisor; do not invent probe behavior here.

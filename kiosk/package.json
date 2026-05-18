@@ -7,7 +7,10 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "next lint"
+    "lint": "eslint ."
+  },
+  "overrides": {
+    "postcss": "^8.5.10"
   },
   "dependencies": {
     "@livekit/components-react": "^2.9.0",
@@ -20,9 +23,12 @@
     "react-dom": "^19.0.0"
   },
   "devDependencies": {
+    "@eslint/eslintrc": "^3.2.0",
     "@types/node": "^22.10.0",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
+    "eslint": "^9.17.0",
+    "eslint-config-next": "^15.5.4",
     "typescript": "^5.7.0"
   }
 }

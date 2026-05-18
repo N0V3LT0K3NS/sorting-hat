@@ -14,15 +14,14 @@ calls :meth:`AgentTask.complete`.
 
 A probe may come back *thin*: if the person can simply choose, there is no
 real tension, and the probe must say so rather than fabricate a dilemma. The
-``tension_is_real`` flag on the result carries that signal so the G8
-supervisor can pivot to a different template instead of trusting a false
-portrait.
+``tension_is_real`` flag on the result carries that signal so the supervisor
+can pivot to a different template instead of trusting a false portrait.
 
-TODO(G8): the supervisor in ``agent/interviewer.py`` constructs this task
-after the base questions when ``two_buttons`` leads the signal weights, runs
-it with ``await TwoButtonsProbeTask()``, and stores the returned
-``TwoButtonsResult`` on ``InterviewState.two_buttons_result`` (pivoting if
-``tension_is_real`` is false). Nothing invokes this probe yet.
+The supervisor in ``agent/interviewer.py`` constructs this task after the
+base questions when ``two_buttons`` leads the signal weights, runs it with
+``await TwoButtonsProbeTask()``, and stores the returned ``TwoButtonsResult``
+on ``InterviewState.two_buttons_result`` (pivoting if ``tension_is_real`` is
+false). This module defines the probe in isolation.
 """
 
 from __future__ import annotations

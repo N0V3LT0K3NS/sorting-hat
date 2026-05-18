@@ -266,3 +266,20 @@ environment. A documented manual lifecycle smoke-test checklist lives in
 [`SMOKE_TEST.md`](./SMOKE_TEST.md) — run it on the actual kiosk machine
 before an install. The production build (`npm run build`) is the automated
 check and must always pass.
+
+## Security notes
+
+### postcss advisory GHSA-qx2v-qp2m-jg93 — resolved 2026-05-17
+
+`npm audit` previously reported 2 moderate-severity vulnerabilities: Next.js
+pins `postcss` at `8.4.31`, which is below the `8.5.10` release that fixes a
+moderate-severity XSS via unescaped `</style>` in CSS stringify output
+(advisory [GHSA-qx2v-qp2m-jg93](https://github.com/advisories/GHSA-qx2v-qp2m-jg93)).
+No Next.js release on any line — 15.x or 16.x — ships a patched `postcss`,
+so `npm audit fix` only offered a breaking downgrade of Next.js itself.
+
+Resolved without a breaking change via a `package.json` `overrides` entry
+forcing `postcss` to `^8.5.10`. `postcss` 8.5.x is the same major version as
+the pinned 8.4.31 and is semver-compatible, so the build is unaffected.
+`npm audit --omit=dev` now reports 0 vulnerabilities. Remove the override
+once Next.js bumps its bundled `postcss` past 8.5.10.

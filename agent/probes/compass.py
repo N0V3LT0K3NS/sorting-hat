@@ -76,10 +76,10 @@ class CompassProbeTask(AgentTask[CompassResult]):
         """Build the probe with the sub-interview prompt as its instructions."""
         super().__init__(instructions=load_probe_prompt())
 
-    # TODO(G8): the supervisor in agent/interviewer.py constructs and awaits
-    # this task once the base questions are done and the leading signal is
-    # `compass`. It passes the running chat context so the probe continues the
-    # same conversation, then writes the returned CompassResult onto
+    # The supervisor in agent/interviewer.py constructs and awaits this task
+    # once the base questions are done and the leading signal is `compass`. It
+    # passes the running chat context so the probe continues the same
+    # conversation, then writes the returned CompassResult onto
     # InterviewState.compass_result and sets chosen_template = "compass".
     # If the result comes back thin, the supervisor pivots to another probe.
 

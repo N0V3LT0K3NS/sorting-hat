@@ -151,14 +151,14 @@ class ArcProbeTask(AgentTask[ArcResult]):
         return "Arc recorded."
 
 
-# TODO(G8): the supervisor (agent/interviewer.py) invokes this probe. After the
-# five base questions, G8 reads InterviewState signal weights — when
+# The supervisor (agent/interviewer.py) invokes this probe. After the five
+# base questions, it reads InterviewState signal weights — when
 # state.leading_template() == "arc", it awaits ArcProbeTask() from within the
 # supervisor's routing flow, then stores the returned ArcResult on
 # InterviewState.arc_result and sets InterviewState.chosen_template. If the
-# result comes back with thread_came_back_thin set, G8's routing pivots to the
-# next-strongest template instead of shipping a thin arc. G7 builds the probe
-# in isolation; no probe delegation is wired here.
+# result comes back with thread_came_back_thin set, the routing pivots to the
+# next-strongest template instead of shipping a thin arc. This module defines
+# the probe in isolation.
 
 
 __all__ = [
