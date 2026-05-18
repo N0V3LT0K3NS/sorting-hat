@@ -99,7 +99,7 @@ def _fake_png_b64() -> str:
     import base64
 
     buf = io.BytesIO()
-    Image.new("RGB", (WIDTH, HEIGHT), (123, 45, 67)).save(buf, "PNG")
+    Image.new("RGB", (1, 1), (123, 45, 67)).save(buf, "PNG")
     return base64.b64encode(buf.getvalue()).decode("ascii")
 
 
@@ -132,6 +132,22 @@ class MockOpenAIClient:
 
     def __init__(self, fail: bool = False) -> None:
         self.images = _MockImages(fail=fail)
+
+
+@pytest.fixture(autouse=True)
+def _block_live_openai_image_api(monkeypatch):
+    """Fail closed: render tests must never build a real OpenAI client."""
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+
+    def fake_get_openai_client(api_key=None):
+        if api_key:
+            raise AssertionError(
+                "render tests must inject MockOpenAIClient; refusing live "
+                "OpenAI image API client construction"
+            )
+        return None
+
+    monkeypatch.setattr("pipeline.render.get_openai_client", fake_get_openai_client)
 
 
 # ---------------------------------------------------------------------------
