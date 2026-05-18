@@ -1,6 +1,6 @@
 # Decision 0001 — Model selection (PROPOSAL — open for review)
 
-**Status:** PROPOSED · awaiting review
+**Status:** PROPOSED · reviewed (Codex + Hermes) · amended v2 · awaiting approval
 **Date:** 2026-05-17
 **Scope:** which models each of sorting-hat's six model-jobs should use.
 
@@ -43,7 +43,7 @@ different requirements, so they should not all use the same model.
 |---|-----|--------------------|---------------------|
 | 1 | Live interviewer brain | **Yes — critical** | Sub-second TTFT; warm, persona-faithful conversation |
 | 2 | Background classifier | Yes — ~1s budget, off critical path | Fast + cheap; modest quality bar (4 floats) |
-| 3 | Offline classification | No (batch) | Strong structural reasoning — the authoritative sort |
+| 3 | Offline classification | No (batch) | **Accuracy** — the authoritative once-per-session sort |
 | 4 | Offline slot-filling | No (batch) | Vivid, sharp, non-generic writing |
 | 5 | STT | Yes | Conversational, agent-grade, fast endpointing |
 | 6 | TTS | Yes | **Warmth** above all, at conversational latency |
@@ -56,10 +56,10 @@ different requirements, so they should not all use the same model.
 |-----|------------------|----------|-----------|
 | 1 · Interviewer brain | `anthropic/claude-haiku-4.5` (reasoning OFF) | `anthropic/claude-sonnet-4.6` | ~0.6–0.85s TTFT — the one capable model that fits the sub-800ms voice budget; follows long persona prompts literally. |
 | 2 · Background classifier | `openai/gpt-oss-120b` **pinned to Groq** | `google/gemini-3.1-flash-lite` | 0.6–0.9s TTFT on Groq's LPU; cheap; the quality bar is just 4 signal floats. |
-| 3 · Offline classification | `z-ai/glm-5.1` | `anthropic/claude-opus-4.7` | ~5× cheaper than Opus ($0.98/$3.08 vs $5/$25 per 1M); #1 SWE-Bench Pro; latency is free offline. |
+| 3 · Offline classification | `anthropic/claude-opus-4.7` | `z-ai/glm-5.1` (challenger) | The authoritative sort runs **once per session** — accuracy, not cost, is the right axis. A cheap wrong sort ruins the whole portrait. GLM is the challenger, promoted only if G17 shows accuracy parity (see Amendment A). |
 | 4 · Offline slot-filling | `anthropic/claude-opus-4.7` | `z-ai/glm-5.1` (A/B in G17) | Best at the "uncomfortably accurate, not horoscope" register. GLM-5.1's proven strength is reasoning, not prose — so it is the challenger, decided by real output in G17. |
 | 5 · STT | `deepgram/flux-general-en` | `assemblyai/universal-3-pro-streaming` | Purpose-built conversational STT; ASR + turn detection fused, sub-400ms endpointing. Already correct. |
-| 6 · TTS | `inworld/inworld-tts-1.5-max` | `cartesia/sonic-3` (pinned) | #1 on blind-preference for emotional realism; ~250ms TTFA still keeps total sub-second. **See open question.** |
+| 6 · TTS | `inworld/inworld-tts-1.5-max` | `cartesia/sonic-3` (pinned) | #1 on blind-preference for emotional realism. Latency cost is real — see the latency budget below — but acceptable for a seated interview. Final call by ear in G17. |
 
 ### Provider routing
 
@@ -104,28 +104,66 @@ matters — is honored: the offline jobs (3, 4) run the strong models.
 
 ---
 
-## Open questions for reviewers
+## Review amendments (v2)
 
-1. **TTS warmth — Inworld vs Sonic-3.** The #1 ranking for
-   `inworld-tts-1.5-max` is aggregate blind-preference ELO, which
-   correlates with but is not identical to "warmth." Sonic-3 is the
-   latency leader (~40ms vs ~250ms TTFA). Proposal: Inworld primary,
-   Sonic-3 pinned fallback, **final call made by ear in G17** with the
-   real interviewer script. Reviewers: agree, or pick Sonic-3 outright?
-2. **Slot-filling — Opus vs GLM-5.1.** Proposal makes Opus 4.7 primary
-   and GLM the A/B challenger. Reviewers: is that the right default, or
-   should GLM lead given the cost difference?
-3. **Sonnet 4.8 watch.** If Sonnet 4.8 ships before G17 and benchmarks
-   show genuinely sub-second TTFT, the Job 1 choice should be revisited.
+This doc was reviewed by two independent agents (Codex CLI, Hermes) on
+PR #22. Both returned "approve with amendments" and **independently
+converged** on the same central flaw. The amendments are folded in above;
+recorded here for the trail.
+
+### Amendment A — Job 3 flipped to Opus primary
+The v1 proposal made GLM-5.1 the authoritative-classification primary on
+cost. Both reviewers rejected this: the authoritative sort runs **once per
+session**, so cost is the wrong axis — a confidently wrong sort ruins the
+whole portrait, and GLM's evidence (SWE-Bench Pro) measures code reasoning,
+not persona classification. **Fixed:** Job 3 is now Opus primary, GLM
+challenger — matching Job 4. GLM is promoted to primary only if the G17
+test harness shows classification-accuracy parity on real transcripts.
+
+### Amendment B — the "sub-second" latency claim was wrong
+v1 claimed the voice loop stays "total sub-second." It does not. Honest
+budget: STT endpointing ~400ms + Haiku TTFT ~700ms + Inworld TTFA ~250ms
+≈ **~1.35s** end-of-speech to start-of-audio. That is still a good
+conversational latency for a seated 10–15 min interview — but it is not
+sub-second, and the doc should not claim otherwise. The metric that most
+affects *felt* responsiveness in a cascaded pipeline is **streaming
+throughput** (tokens pipe to TTS before the response finishes), not TTFT
+alone — which is a further reason Haiku wins Job 1. The G2 latency
+instrumentation already in `agent/main.py` measures the real number; G17
+confirms it against live calls.
+
+### Amendment C — acknowledged gaps, deferred to G17 (not built now)
+Reviewers flagged several things the proposal did not cover. Per YAGNI,
+these are **acknowledged here, not solved with new machinery now** —
+they belong to the G17 live-validation pass:
+- **G17 TTS ear-test needs an exit condition** — decide it in G17: a
+  small set of script excerpts, the operator listens, picks Inworld or
+  Sonic-3. No elaborate rubric needed; it is a taste call.
+- **PII / provider data retention** — a kiosk records real voices.
+  Before any public deployment, confirm Deepgram / Inworld / OpenRouter
+  retention terms and state the data policy. Tracked as a G17 gate, not
+  a model-selection question.
+- **Classifier divergence** — the background classifier (Job 2) only
+  *nudges* signal weights; Job 3 is authoritative and overrides. That is
+  the reconciliation — no separate logic required. Job 2 informs the
+  live probe choice; Job 3 decides the final sort. Documented, done.
+- **Provider failure** — the fallbacks named per job are the policy.
+  LiveKit/OpenRouter handle retry; if a fallback is ever needed
+  mid-interview the call simply uses the fallback model. No circuit
+  breaker is warranted at this scale (one kiosk, one session at a time).
+
+### Still open
+- **Sonnet 4.8 watch.** If it ships before G17 with genuinely sub-second
+  TTFT, revisit the Job 1 choice. Until then, Haiku 4.5.
 
 ---
 
 ## If approved
 
-A follow-up goal **G16.1 — model selection** applies this to
+A follow-up goal **G16.1 — model selection** applies the amended table to
 `agent/config.py`, `agent/classifier.py`, and the `pipeline/` LLM calls,
-with the provider-routing config and the fallbacks wired in. No code
-changes here — this PR is the decision record only.
+with the per-job fallbacks and provider routing wired in. No code changes
+in this PR — it is the decision record only.
 
 ---
 
