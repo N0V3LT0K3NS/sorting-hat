@@ -397,6 +397,52 @@ def wire_session_finalize(
 
 
 # ---------------------------------------------------------------------------
+# FIX-4A — wire the realtime background classifier onto user turns
+# ---------------------------------------------------------------------------
+
+
+def wire_classifier(session: AgentSession, agent: InterviewerAgent) -> None:
+    """Wire the background signal classifier onto the session's user turns.
+
+    FIX-4A: the classifier (:func:`agent.classifier.classify_turn`) is meant
+    to score every user turn in realtime and nudge the four signal weights on
+    the shared :class:`InterviewState`, so the supervisor's probe routing
+    reflects what the person actually said. :meth:`InterviewerAgent.on_user_turn`
+    fires that scoring as a background task — but nothing was *calling* it,
+    so after a full interview all four signals were still 0.0.
+
+    This registers the missing seam: a handler on the session's
+    ``user_input_transcribed`` event (LiveKit v1.5.9 —
+    :class:`~livekit.agents.voice.events.UserInputTranscribedEvent`, carrying
+    ``transcript: str`` and ``is_final: bool``). The classifier is fired
+    **once per completed user utterance** — only on the FINAL transcript;
+    interim/partial transcripts are ignored so a turn is not scored several
+    times as it is still being recognised.
+
+    ``on_user_turn`` writes its scores back into the *same* InterviewState
+    object that backs the session's ``userdata`` and that ``session_finalize``
+    persists, so a real interview's ``interview_state.json`` ends with
+    non-zero signal weights.
+
+    The handler is synchronous (LiveKit event callbacks are); ``on_user_turn``
+    itself only schedules a background task and returns immediately, so the
+    callback never blocks the voice loop.
+    """
+
+    def _on_user_input_transcribed(ev: object) -> None:
+        # Only the FINAL transcript of a turn is scored — interim partials
+        # would score the same utterance repeatedly as it is recognised.
+        if not getattr(ev, "is_final", False):
+            return
+        transcript = getattr(ev, "transcript", None)
+        if not transcript or not transcript.strip():
+            return
+        agent.on_user_turn(transcript)
+
+    session.on("user_input_transcribed", _on_user_input_transcribed)
+
+
+# ---------------------------------------------------------------------------
 # Live worker entrypoint
 # ---------------------------------------------------------------------------
 
@@ -434,6 +480,18 @@ async def entrypoint(ctx: JobContext) -> None:
     # turn is captured.
     session_id = ctx.room.name
     wire_session_finalize(parts.session, agent, parts.state, session_id)
+
+    # FIX-4A: wire the realtime background classifier onto user turns so the
+    # four signal weights on parts.state advance live as the person speaks —
+    # the same InterviewState the supervisor routes on and session_finalize
+    # persists. on_user_turn fires classify_turn as a background task.
+    wire_classifier(parts.session, agent)
+
+    # Drain any in-flight classifier background tasks when the job shuts down,
+    # so a classifier still waiting on a slow LLM hop does not outlive the
+    # interview. add_shutdown_callback runs alongside the existing finalize
+    # logic on session/job teardown.
+    ctx.add_shutdown_callback(agent.aclose_classifiers)
 
     await ctx.connect()
     await parts.session.start(agent=agent, room=ctx.room)
