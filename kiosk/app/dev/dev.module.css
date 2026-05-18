@@ -1,0 +1,230 @@
+/* Developer / diagnostic view — the live classifier visualizer.
+   Dark and readable like the kiosk, but plain: this is a tool, not a
+   visitor surface. Left-aligned, scrollable, dense — no fade theatre. */
+
+.page {
+  min-height: 100%;
+  width: 100%;
+  background: var(--bg);
+  color: var(--fg);
+  padding: 2rem clamp(1rem, 4vw, 3rem);
+  overflow-y: auto;
+}
+
+.inner {
+  max-width: 760px;
+  margin: 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 1.75rem;
+}
+
+/* --- Header --- */
+
+.header {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  border-bottom: 1px solid #1a1a1a;
+  padding-bottom: 1rem;
+}
+
+.title {
+  font-size: 1.4rem;
+  font-weight: 400;
+  letter-spacing: 0.02em;
+}
+
+.subtitle {
+  font-size: 0.9rem;
+  font-weight: 300;
+  color: var(--fg-dim);
+}
+
+/* --- Session-id input --- */
+
+.sessionRow {
+  display: flex;
+  gap: 0.6rem;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.sessionInput {
+  flex: 1 1 240px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.95rem;
+  background: #0d0d0d;
+  color: var(--fg);
+  border: 1px solid #2a2a2a;
+  border-radius: 6px;
+  padding: 0.6rem 0.8rem;
+}
+
+.sessionInput:focus {
+  outline: none;
+  border-color: var(--accent-dim);
+}
+
+.sessionButton {
+  font-size: 0.9rem;
+  font-weight: 400;
+  color: var(--bg);
+  background: var(--accent);
+  border: none;
+  border-radius: 6px;
+  padding: 0.6rem 1.4rem;
+}
+
+.sessionButton:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+/* --- Empty / waiting states --- */
+
+.empty {
+  font-size: 1rem;
+  font-weight: 300;
+  color: var(--fg-dim);
+  line-height: 1.6;
+  padding: 2rem 0;
+}
+
+/* --- Section blocks --- */
+
+.section {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.sectionLabel {
+  font-size: 0.78rem;
+  font-weight: 400;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--fg-dim);
+}
+
+/* --- Signal bars --- */
+
+.bars {
+  display: flex;
+  flex-direction: column;
+  gap: 0.7rem;
+}
+
+.bar {
+  display: grid;
+  grid-template-columns: 7.5rem 1fr 3.5rem;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.barName {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.9rem;
+  color: var(--fg-dim);
+}
+
+.bar[data-leading="true"] .barName {
+  color: var(--accent);
+}
+
+.barTrack {
+  height: 1.5rem;
+  background: #141414;
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.barFill {
+  height: 100%;
+  background: var(--accent-dim);
+  border-radius: 4px;
+  /* Eases as new turns are classified — visibly moving, not jumpy. */
+  transition: width 600ms ease;
+}
+
+.bar[data-leading="true"] .barFill {
+  background: var(--accent);
+}
+
+.barValue {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.9rem;
+  text-align: right;
+  color: var(--fg);
+}
+
+/* --- Progress --- */
+
+.progressTrack {
+  height: 0.75rem;
+  background: #141414;
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.progressFill {
+  height: 100%;
+  background: var(--accent);
+  border-radius: 4px;
+  transition: width 600ms ease;
+}
+
+.progressLabel {
+  font-size: 0.95rem;
+  font-weight: 300;
+}
+
+/* --- Facts grid (phase, templates, counts) --- */
+
+.facts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 0.85rem 1.5rem;
+}
+
+.fact {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+}
+
+.factKey {
+  font-size: 0.72rem;
+  font-weight: 400;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--fg-dim);
+}
+
+.factValue {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.95rem;
+  color: var(--fg);
+}
+
+.factValue[data-accent="true"] {
+  color: var(--accent);
+}
+
+.factValue[data-dim="true"] {
+  color: var(--fg-dim);
+}
+
+/* --- Footer status line --- */
+
+.status {
+  font-size: 0.82rem;
+  font-weight: 300;
+  color: var(--fg-dim);
+  border-top: 1px solid #1a1a1a;
+  padding-top: 0.85rem;
+}
+
+.statusWarn {
+  color: var(--error);
+}

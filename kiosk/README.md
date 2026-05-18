@@ -37,6 +37,27 @@ Black background, a single warm amber accent, large readable type, and
 calm fade transitions with a slow breathing glow so the idle screen never
 feels dead.
 
+## Developer view (`/dev`)
+
+A separate diagnostic route at `/dev`, away from the visitor kiosk flow at
+`/`. It shows, **live as an interview runs**, what the background classifier
+is capturing:
+
+- the four classifier **signal weights** (`iceberg`, `two_buttons`,
+  `compass`, `arc`) as horizontal bars that move as new turns are scored —
+  the leading signal's bar is shown in the accent color;
+- **base-question progress** — `N / total` with a progress bar;
+- the interview **phase**, the **leading** and **chosen** template,
+  `routing_done`, the **turn count**, and the `updated_at` timestamp.
+
+Point it at a running interview either by query param —
+`/dev?session=<session-id>` — or by typing/pasting the session id into the
+text input on the page. It polls the delivery server's
+`GET /live/<session-id>` every ~1.75 s (via `NEXT_PUBLIC_DELIVERY_SERVER_URL`,
+the same server the Complete screen uses). If no session is set, or the
+server is unreachable, or the session has no state yet, it shows a calm
+line and keeps polling. This route never affects the kiosk flow at `/`.
+
 ## Session lifecycle
 
 Pressing _begin_ runs an explicit, bounded lifecycle. Each step is designed
