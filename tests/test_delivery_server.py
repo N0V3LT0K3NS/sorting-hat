@@ -21,7 +21,7 @@ from http import HTTPStatus
 
 import pytest
 
-from delivery.server import build_server, read_status
+from delivery.server import build_server, read_live_state, read_status
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -72,6 +72,39 @@ def _get(url):
             return resp.status, resp.read(), resp.headers.get("Content-Type", "")
     except urllib.error.HTTPError as exc:
         return exc.code, exc.read(), exc.headers.get("Content-Type", "")
+
+
+def _request(url, method="GET"):
+    """Make ``method`` request to ``url``; return ``(status, body, headers)``.
+
+    ``headers`` is the response's ``http.client.HTTPMessage`` — used to assert
+    on CORS headers the lighter ``_get`` helper discards.
+    """
+    req = urllib.request.Request(url, method=method)
+    try:
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            return resp.status, resp.read(), resp.headers
+    except urllib.error.HTTPError as exc:
+        return exc.code, exc.read(), exc.headers
+
+
+def _write_live_state(folder, **overrides):
+    """Write a live_state.json into ``folder`` with sensible defaults."""
+    folder.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "session_id": folder.name,
+        "phase": "base_questions",
+        "base_questions_completed": 2,
+        "base_questions_total": 5,
+        "signals": {"iceberg": 0.7, "two_buttons": 0.1, "compass": 0.0, "arc": 0.0},
+        "leading_template": "iceberg",
+        "chosen_template": None,
+        "routing_done": False,
+        "turn_count": 4,
+        "updated_at": "2026-05-18T12:00:00+00:00",
+    }
+    payload.update(overrides)
+    (folder / "live_state.json").write_text(json.dumps(payload), encoding="utf-8")
 
 
 # ---------------------------------------------------------------------------
@@ -235,3 +268,147 @@ def test_unsafe_session_id_rejected(server, sessions_dir) -> None:
     assert code in (HTTPStatus.BAD_REQUEST, HTTPStatus.NOT_FOUND, HTTPStatus.OK)
     if code == HTTPStatus.OK:
         assert json.loads(body)["stage"] in ("pending", "error")
+
+
+# ---------------------------------------------------------------------------
+# read_live_state — the pure function
+# ---------------------------------------------------------------------------
+
+_LIVE_KEYS = {
+    "session_id", "phase", "base_questions_completed", "base_questions_total",
+    "signals", "leading_template", "chosen_template", "routing_done",
+    "turn_count", "updated_at",
+}
+
+
+def test_read_live_state_reports_the_shape(sessions_dir) -> None:
+    """read_live_state surfaces the live_state.json contents."""
+    _write_live_state(sessions_dir / "sess-l1")
+    live = read_live_state("sess-l1", sessions_dir=sessions_dir)
+    assert set(live) == _LIVE_KEYS
+    assert live["session_id"] == "sess-l1"
+    assert live["phase"] == "base_questions"
+    assert live["signals"]["iceberg"] == 0.7
+    assert live["leading_template"] == "iceberg"
+    assert live["turn_count"] == 4
+
+
+def test_read_live_state_pending_when_missing(sessions_dir) -> None:
+    """A session with no live_state.json degrades to phase 'pending'."""
+    live = read_live_state("never-interviewed", sessions_dir=sessions_dir)
+    assert live["phase"] == "pending"
+    assert live["signals"] == {
+        "iceberg": 0.0, "two_buttons": 0.0, "compass": 0.0, "arc": 0.0
+    }
+    assert live["routing_done"] is False
+    assert live["chosen_template"] is None
+    assert live["updated_at"] is None
+
+
+def test_read_live_state_corrupt_json_degrades(sessions_dir) -> None:
+    """A corrupt live_state.json degrades to the pending default — no raise."""
+    folder = sessions_dir / "sess-lbad"
+    folder.mkdir(parents=True)
+    (folder / "live_state.json").write_text("{not json", encoding="utf-8")
+    live = read_live_state("sess-lbad", sessions_dir=sessions_dir)
+    assert live["phase"] == "pending"
+    assert live["signals"]["iceberg"] == 0.0
+
+
+def test_read_live_state_unknown_phase_degrades(sessions_dir) -> None:
+    """An unrecognised phase value falls back to 'pending', not passed through."""
+    _write_live_state(sessions_dir / "sess-lphase", phase="nonsense")
+    live = read_live_state("sess-lphase", sessions_dir=sessions_dir)
+    assert live["phase"] == "pending"
+
+
+# ---------------------------------------------------------------------------
+# GET /live/<id> over HTTP
+# ---------------------------------------------------------------------------
+
+
+def test_live_endpoint_shape_and_phase(server, sessions_dir) -> None:
+    """GET /live/<id> returns the documented JSON shape and phase."""
+    _write_live_state(sessions_dir / "sess-lhttp", phase="probing")
+    code, body, ctype = _get(f"{server}/live/sess-lhttp")
+    assert code == HTTPStatus.OK
+    assert "application/json" in ctype
+    payload = json.loads(body)
+    assert set(payload) == _LIVE_KEYS
+    assert payload["session_id"] == "sess-lhttp"
+    assert payload["phase"] == "probing"
+    assert payload["signals"]["iceberg"] == 0.7
+
+
+def test_live_endpoint_pending_no_500(server, sessions_dir) -> None:
+    """A session with no live_state.json returns 200 phase 'pending' — no 500."""
+    code, body, _ = _get(f"{server}/live/ghost-interview")
+    assert code == HTTPStatus.OK
+    payload = json.loads(body)
+    assert payload["phase"] == "pending"
+    assert payload["signals"] == {
+        "iceberg": 0.0, "two_buttons": 0.0, "compass": 0.0, "arc": 0.0
+    }
+    assert payload["routing_done"] is False
+
+
+def test_live_endpoint_complete_phase(server, sessions_dir) -> None:
+    """A routed interview reports phase 'complete' and the chosen template."""
+    _write_live_state(
+        sessions_dir / "sess-lcomplete",
+        phase="complete",
+        routing_done=True,
+        chosen_template="compass",
+    )
+    code, body, _ = _get(f"{server}/live/sess-lcomplete")
+    assert code == HTTPStatus.OK
+    payload = json.loads(body)
+    assert payload["phase"] == "complete"
+    assert payload["routing_done"] is True
+    assert payload["chosen_template"] == "compass"
+
+
+def test_live_endpoint_unsafe_id_no_500(server, sessions_dir) -> None:
+    """An unsafe session id on /live still gets the pending shape, never 5xx."""
+    code, body, _ = _get(f"{server}/live/..%2F..%2Fetc")
+    assert code in (HTTPStatus.BAD_REQUEST, HTTPStatus.NOT_FOUND, HTTPStatus.OK)
+    if code in (HTTPStatus.OK, HTTPStatus.BAD_REQUEST):
+        assert json.loads(body)["phase"] == "pending"
+
+
+# ---------------------------------------------------------------------------
+# CORS — the kiosk fetches /status and /live cross-origin
+# ---------------------------------------------------------------------------
+
+
+def test_cors_header_on_status(server, sessions_dir) -> None:
+    """GET /status/<id> sends a permissive Access-Control-Allow-Origin header."""
+    _write_status(sessions_dir / "sess-cors-st", "filling")
+    code, _, headers = _request(f"{server}/status/sess-cors-st")
+    assert code == HTTPStatus.OK
+    assert headers.get("Access-Control-Allow-Origin") == "*"
+
+
+def test_cors_header_on_live(server, sessions_dir) -> None:
+    """GET /live/<id> sends a permissive Access-Control-Allow-Origin header."""
+    _write_live_state(sessions_dir / "sess-cors-live")
+    code, _, headers = _request(f"{server}/live/sess-cors-live")
+    assert code == HTTPStatus.OK
+    assert headers.get("Access-Control-Allow-Origin") == "*"
+
+
+def test_cors_header_on_pending_responses(server, sessions_dir) -> None:
+    """The graceful 'pending' responses also carry CORS headers."""
+    _, _, status_headers = _request(f"{server}/status/ghost")
+    _, _, live_headers = _request(f"{server}/live/ghost")
+    assert status_headers.get("Access-Control-Allow-Origin") == "*"
+    assert live_headers.get("Access-Control-Allow-Origin") == "*"
+
+
+def test_options_preflight_answered(server, sessions_dir) -> None:
+    """An OPTIONS preflight to /live is answered with CORS headers, no body."""
+    code, body, headers = _request(f"{server}/live/sess-preflight", method="OPTIONS")
+    assert code == HTTPStatus.NO_CONTENT
+    assert headers.get("Access-Control-Allow-Origin") == "*"
+    assert "GET" in (headers.get("Access-Control-Allow-Methods") or "")
+    assert body == b""

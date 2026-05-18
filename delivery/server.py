@@ -14,13 +14,22 @@ file server plus a status file the kiosk polls:
 * ``GET /status/<session-id>``       — JSON pipeline progress, the endpoint the
   kiosk polls for the stage-by-stage reveal:
   ``{"session_id", "stage", "portrait_url", "qr_url", "error"}``.
+* ``GET /live/<session-id>``         — JSON live interview state, the endpoint
+  the kiosk polls *during* an interview for the classifier signal weights and
+  the interview's progress (developer view + smart End button).
 
 It runs on the *kiosk machine* and binds ``0.0.0.0`` so phones on the same
 wifi can reach the per-session portrait page the QR encodes.
 
 ``status.json`` is written by :func:`agent.session_finalize.write_status` at
-each pipeline-stage boundary. A session folder (or status file) that does not
-exist yet degrades to stage ``pending`` — never a 500.
+each pipeline-stage boundary; ``live_state.json`` is written by
+:func:`agent.session_finalize.write_live_state` after every interview turn.
+A session folder (or either JSON file) that does not exist yet degrades to a
+graceful default — ``pending`` — never a 500.
+
+The JSON endpoints (``/status`` and ``/live``) send permissive CORS headers
+(``Access-Control-Allow-Origin: *``) and answer an ``OPTIONS`` preflight, so
+the kiosk browser app — served from a different origin/port — can fetch them.
 """
 
 from __future__ import annotations
@@ -51,6 +60,22 @@ DEFAULT_SESSIONS_DIR = "./sessions"
 PORTRAIT_FILENAME = "portrait.png"
 QR_FILENAME = "qr.png"
 STATUS_FILENAME = "status.json"
+#: Live-interview state file, written each turn by agent.session_finalize.
+LIVE_STATE_FILENAME = "live_state.json"
+
+#: The interview phases a live_state.json may report. ``pending`` is this
+#: server's own degraded value for a session whose live_state.json does not
+#: exist yet (the interview has not produced any state).
+KNOWN_PHASES = {
+    "pending",
+    "base_questions",
+    "probing",
+    "complete",
+}
+
+#: The four classifier signals, zeroed — the graceful default ``signals`` block
+#: for a session with no live_state.json yet.
+_ZERO_SIGNALS = {"iceberg": 0.0, "two_buttons": 0.0, "compass": 0.0, "arc": 0.0}
 
 #: The pipeline stages a status.json may report. ``pending`` is this server's
 #: own degraded value for a session whose status.json does not exist yet.
@@ -133,6 +158,78 @@ def read_status(session_id: str, *, sessions_dir: Optional[Path] = None) -> dict
     }
 
 
+def read_live_state(session_id: str, *, sessions_dir: Optional[Path] = None) -> dict:
+    """Return the live interview-state dict for ``session_id``.
+
+    Reads ``sessions/<session_id>/live_state.json`` (written by
+    :func:`agent.session_finalize.write_live_state` after every interview turn)
+    and returns the kiosk-facing shape::
+
+        {"session_id", "phase", "base_questions_completed",
+         "base_questions_total", "signals", "leading_template",
+         "chosen_template", "routing_done", "turn_count", "updated_at"}
+
+    A missing session folder or missing/corrupt live_state.json degrades to a
+    graceful default — phase ``pending``, zeroed signals — and never raises, so
+    the polling kiosk always has a uniform shape to parse.
+    """
+    root = sessions_dir if sessions_dir is not None else sessions_root()
+    folder = Path(root) / session_id
+    live_path = folder / LIVE_STATE_FILENAME
+
+    default = {
+        "session_id": session_id,
+        "phase": "pending",
+        "base_questions_completed": 0,
+        "base_questions_total": 0,
+        "signals": dict(_ZERO_SIGNALS),
+        "leading_template": None,
+        "chosen_template": None,
+        "routing_done": False,
+        "turn_count": 0,
+        "updated_at": None,
+    }
+
+    if not live_path.is_file():
+        return default
+
+    try:
+        raw = json.loads(live_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as exc:
+        logger.warning(
+            "session %s: live_state.json unreadable (%s)", session_id, exc
+        )
+        return default
+    if not isinstance(raw, dict):
+        logger.warning("session %s: live_state.json is not an object", session_id)
+        return default
+
+    # Build the response from the defaults, overlaying recognised fields. The
+    # phase is validated against KNOWN_PHASES; an unknown value degrades to the
+    # default rather than being passed through.
+    result = dict(default)
+    for key in (
+        "base_questions_completed",
+        "base_questions_total",
+        "leading_template",
+        "chosen_template",
+        "routing_done",
+        "turn_count",
+        "updated_at",
+    ):
+        if key in raw:
+            result[key] = raw[key]
+    phase = str(raw.get("phase") or "").strip()
+    if phase in KNOWN_PHASES:
+        result["phase"] = phase
+    signals = raw.get("signals")
+    if isinstance(signals, dict):
+        result["signals"] = {
+            label: signals.get(label, 0.0) for label in _ZERO_SIGNALS
+        }
+    return result
+
+
 # --- The per-session portrait page ------------------------------------------
 
 _PORTRAIT_PAGE = """<!DOCTYPE html>
@@ -187,6 +284,17 @@ class DeliveryHandler(BaseHTTPRequestHandler):
 
     # -- response helpers ----------------------------------------------------
 
+    def _send_cors_headers(self) -> None:
+        """Emit permissive CORS headers for the JSON endpoints.
+
+        The kiosk is a browser app served from a different origin/port, so it
+        needs ``Access-Control-Allow-Origin: *`` to fetch ``/status`` and
+        ``/live``. Called after ``send_response`` and before ``end_headers``.
+        """
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "*")
+
     def _send_json(self, payload: dict, status: HTTPStatus = HTTPStatus.OK) -> None:
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         self.send_response(status)
@@ -194,6 +302,8 @@ class DeliveryHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         # The kiosk polls this; never let a stale response be cached.
         self.send_header("Cache-Control", "no-store")
+        # The kiosk fetches this cross-origin — permissive CORS.
+        self._send_cors_headers()
         self.end_headers()
         self.wfile.write(body)
 
@@ -216,6 +326,18 @@ class DeliveryHandler(BaseHTTPRequestHandler):
     def do_HEAD(self) -> None:  # noqa: N802
         self.do_GET()
 
+    def do_OPTIONS(self) -> None:  # noqa: N802
+        """Answer a CORS preflight — 204 with the permissive CORS headers.
+
+        The kiosk's cross-origin ``fetch`` of ``/status`` or ``/live`` may
+        trigger an ``OPTIONS`` preflight; answer it so the real request is
+        allowed through.
+        """
+        self.send_response(HTTPStatus.NO_CONTENT)
+        self._send_cors_headers()
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
     def do_GET(self) -> None:  # noqa: N802
         # Strip any query string; we route on the path only.
         path = self.path.split("?", 1)[0]
@@ -224,6 +346,12 @@ class DeliveryHandler(BaseHTTPRequestHandler):
         if path.startswith("/status/"):
             session_id = path[len("/status/"):].strip("/")
             self._handle_status(session_id)
+            return
+
+        # GET /live/<session-id>
+        if path.startswith("/live/"):
+            session_id = path[len("/live/"):].strip("/")
+            self._handle_live(session_id)
             return
 
         # Everything else is a per-session file route: /<session-id>/...
@@ -272,6 +400,32 @@ class DeliveryHandler(BaseHTTPRequestHandler):
             )
             return
         self._send_json(read_status(session_id))
+
+    def _handle_live(self, session_id: str) -> None:
+        """GET /live/<session-id> — live interview-state JSON, never 500.
+
+        Mirrors :meth:`_handle_status`: an unsafe session id still gets the
+        documented shape (the graceful ``pending`` default) so the polling
+        kiosk has a uniform thing to parse, never a hard error.
+        """
+        if not _is_safe_session_id(session_id):
+            self._send_json(
+                {
+                    "session_id": session_id,
+                    "phase": "pending",
+                    "base_questions_completed": 0,
+                    "base_questions_total": 0,
+                    "signals": dict(_ZERO_SIGNALS),
+                    "leading_template": None,
+                    "chosen_template": None,
+                    "routing_done": False,
+                    "turn_count": 0,
+                    "updated_at": None,
+                },
+                HTTPStatus.BAD_REQUEST,
+            )
+            return
+        self._send_json(read_live_state(session_id))
 
     def _handle_portrait_page(self, session_id: str, folder: Path) -> None:
         """GET /<session-id>/ — the mobile portrait page the QR points at."""
