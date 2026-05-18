@@ -325,13 +325,6 @@ def wire_session_finalize(
     finalize_started = {"done": False}
     route_started = {"done": False}
 
-    def _interviewee_turn_count() -> int:
-        return sum(
-            1
-            for speaker, text in state.transcript_turns()
-            if speaker == INTERVIEWEE_ROLE and text.strip()
-        )
-
     def _persist_current_state() -> None:
         try:
             persist_transcript(session_id, state)
@@ -363,7 +356,7 @@ def wire_session_finalize(
         _maybe_finalize()
 
     def _drive_supervisor() -> None:
-        agent.advance_base_questions_from_interviewee_turns(_interviewee_turn_count())
+        agent.advance_base_questions_from_recorded_turns()
 
         if agent.base_questions_done and not agent.routing_done and not route_started["done"]:
             route_started["done"] = True

@@ -164,6 +164,11 @@ class ProbeOutcome:
 # inject fakes so routing can be proven with no live LLM and no session.
 ProbeRunner = Callable[[], Awaitable[ProbeOutcome]]
 
+# A ClassifierRunner scores one interviewee turn. The live worker uses the
+# real OpenRouter-backed classifier; offline replay can inject a local stub
+# while still exercising InterviewerAgent.on_user_turn().
+ClassifierRunner = Callable[[str], Awaitable[dict[str, float]]]
+
 
 async def _run_iceberg() -> ProbeOutcome:
     """Default runner for the Iceberg probe — awaits the real ``AgentTask``.
@@ -261,6 +266,7 @@ class InterviewerAgent(Agent):
         self,
         state: InterviewState | None = None,
         probe_runners: dict[str, ProbeRunner] | None = None,
+        classifier: ClassifierRunner | None = None,
     ) -> None:
         """Build the interviewer with the persona prompt as its instructions.
 
@@ -273,12 +279,18 @@ class InterviewerAgent(Agent):
         :data:`DEFAULT_PROBE_RUNNERS`, which await the real LiveKit
         ``AgentTask`` probes. A test passes its own registry of fakes so the
         routing logic can be proven with no live LLM and no session.
+
+        ``classifier`` is the one-turn background scorer fired by
+        :meth:`on_user_turn`. The default is the real OpenRouter-backed
+        :func:`agent.classifier.classify_turn`; replay/tests may inject a
+        deterministic local scorer without changing the live wiring.
         """
         super().__init__(instructions=load_persona())
         self._state: InterviewState = state if state is not None else InterviewState()
         self._probe_runners: dict[str, ProbeRunner] = (
             dict(probe_runners) if probe_runners is not None else dict(DEFAULT_PROBE_RUNNERS)
         )
+        self._classifier: ClassifierRunner | None = classifier
         # Templates whose probe has already been run this interview — so a
         # pivot never re-runs a shape the supervisor already tried.
         self._probes_attempted: list[str] = []
@@ -364,6 +376,26 @@ class InterviewerAgent(Agent):
             advanced += 1
         return advanced
 
+    def interviewee_turn_count(self) -> int:
+        """Return the number of non-empty interviewee turns recorded so far."""
+        return sum(
+            1
+            for speaker, text in self._state.transcript_turns()
+            if speaker == INTERVIEWEE_ROLE and text.strip()
+        )
+
+    def advance_base_questions_from_recorded_turns(self) -> int:
+        """Advance base progress from the transcript already on state.
+
+        This is the shared observer step used by the live session's
+        ``conversation_item_added`` handler and by the offline replay harness:
+        after a turn has been recorded, count completed interviewee turns and
+        apply the same monotonic turn-count heuristic.
+        """
+        return self.advance_base_questions_from_interviewee_turns(
+            self.interviewee_turn_count()
+        )
+
     # --- Background classifier (G14, observer pattern) --------------------
 
     @property
@@ -404,7 +436,8 @@ class InterviewerAgent(Agent):
             return None
 
         try:
-            task = asyncio.ensure_future(classify_turn(user_response))
+            classifier = self._classifier or classify_turn
+            task = asyncio.ensure_future(classifier(user_response))
         except RuntimeError:
             # No running event loop — nothing to fire onto. The interview
             # simply runs without mid-interview signal nudges; the supervisor
@@ -662,6 +695,7 @@ __all__ = [
     "load_persona",
     "ProbeOutcome",
     "ProbeRunner",
+    "ClassifierRunner",
     "DEFAULT_PROBE_RUNNERS",
     "MAX_PROBE_ATTEMPTS",
     "TEMPLATE_ORDER",
