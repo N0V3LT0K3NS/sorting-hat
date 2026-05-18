@@ -17,6 +17,12 @@ file server plus a status file the kiosk polls:
 * ``GET /live/<session-id>``         — JSON live interview state, the endpoint
   the kiosk polls *during* an interview for the classifier signal weights and
   the interview's progress (developer view + smart End button).
+* ``GET /sessions``                  — JSON index of *every* session folder on
+  this machine, one summary per interview; the dev dashboard's session list.
+* ``GET /<session-id>/<file>``        — the known per-session JSON artifacts
+  (transcript.json, interview_state.json, classification.json, result.json,
+  live_state.json, status.json) so a dev detail view can fetch a past
+  interview's transcript. Allowlisted filenames only; no path escape.
 
 It runs on the *kiosk machine* and binds ``0.0.0.0`` so phones on the same
 wifi can reach the per-session portrait page the QR encodes.
@@ -38,6 +44,7 @@ import json
 import logging
 import os
 import re
+from datetime import datetime, timezone
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -62,6 +69,32 @@ QR_FILENAME = "qr.png"
 STATUS_FILENAME = "status.json"
 #: Live-interview state file, written each turn by agent.session_finalize.
 LIVE_STATE_FILENAME = "live_state.json"
+#: Transcript + interview-state files, written each turn by persist_transcript.
+TRANSCRIPT_FILENAME = "transcript.json"
+STATE_FILENAME = "interview_state.json"
+#: Offline-pipeline artifacts, written by run_offline_pipeline.
+CLASSIFICATION_FILENAME = "classification.json"
+RESULT_FILENAME = "result.json"
+
+#: The image artifacts a session folder may hold, mapped to their MIME type.
+_IMAGE_ARTIFACTS = {
+    PORTRAIT_FILENAME: "image/png",
+    QR_FILENAME: "image/png",
+}
+
+#: The JSON artifacts a dev detail view may fetch from a session folder. An
+#: explicit allowlist — only these names are served, never an arbitrary path,
+#: so a ``../`` escape can never reach outside the session folder.
+_JSON_ARTIFACTS = frozenset(
+    {
+        TRANSCRIPT_FILENAME,
+        STATE_FILENAME,
+        CLASSIFICATION_FILENAME,
+        RESULT_FILENAME,
+        LIVE_STATE_FILENAME,
+        STATUS_FILENAME,
+    }
+)
 
 #: The interview phases a live_state.json may report. ``pending`` is this
 #: server's own degraded value for a session whose live_state.json does not
@@ -230,6 +263,164 @@ def read_live_state(session_id: str, *, sessions_dir: Optional[Path] = None) -> 
     return result
 
 
+def _read_json(path: Path) -> Optional[dict]:
+    """Return the parsed JSON object at ``path``, or ``None`` if absent/bad.
+
+    A missing file, unreadable file, malformed JSON, or a JSON value that is
+    not an object all degrade to ``None`` — a session-index summary must never
+    500 on a partial or corrupt folder.
+    """
+    if not path.is_file():
+        return None
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as exc:
+        logger.warning("%s unreadable (%s)", path, exc)
+        return None
+    return raw if isinstance(raw, dict) else None
+
+
+def _summarize_session(folder: Path) -> dict:
+    """Build the index summary for one session folder.
+
+    Reads whatever JSON files exist (gracefully — a folder may hold only a
+    transcript, or the full pipeline output) and rolls them into a uniform
+    summary. Never raises; an empty/partial folder yields sensible defaults.
+    """
+    session_id = folder.name
+
+    live = _read_json(folder / LIVE_STATE_FILENAME)
+    status = _read_json(folder / STATUS_FILENAME)
+    state = _read_json(folder / STATE_FILENAME)
+    transcript = folder / TRANSCRIPT_FILENAME
+    has_transcript = transcript.is_file()
+    has_portrait = (folder / PORTRAIT_FILENAME).is_file()
+    has_classification = (folder / CLASSIFICATION_FILENAME).is_file()
+
+    # phase — from live_state.json, validated; 'unknown' when there is no
+    # live_state (a phase the kiosk never writes, distinct from 'pending').
+    phase = "unknown"
+    if live is not None:
+        candidate = str(live.get("phase") or "").strip()
+        if candidate in KNOWN_PHASES:
+            phase = candidate
+
+    # pipeline_stage — from status.json, validated; null when no status.json.
+    pipeline_stage: Optional[str] = None
+    if status is not None:
+        candidate = str(status.get("stage") or "").strip()
+        pipeline_stage = candidate if candidate in KNOWN_STAGES else "error"
+
+    # turn_count — live_state's own count first, else count transcript turns.
+    turn_count = 0
+    if live is not None and isinstance(live.get("turn_count"), int):
+        turn_count = live["turn_count"]
+    elif has_transcript:
+        turns = _read_json_list(transcript)
+        turn_count = len(turns) if turns is not None else 0
+
+    # chosen_template — live_state first, then interview_state.
+    chosen_template: Optional[str] = None
+    if live is not None and live.get("chosen_template"):
+        chosen_template = live["chosen_template"]
+    elif state is not None and state.get("chosen_template"):
+        chosen_template = state["chosen_template"]
+
+    # updated_at — live_state's timestamp if present, else the folder's most
+    # recent mtime (the folder itself or any file in it) as an ISO string.
+    updated_at: Optional[str] = None
+    if live is not None and isinstance(live.get("updated_at"), str):
+        updated_at = live["updated_at"]
+    if not updated_at:
+        updated_at = _folder_mtime_iso(folder)
+
+    portrait_url = f"/{session_id}/{PORTRAIT_FILENAME}" if has_portrait else None
+
+    return {
+        "session_id": session_id,
+        "phase": phase,
+        "pipeline_stage": pipeline_stage,
+        "turn_count": turn_count,
+        "chosen_template": chosen_template,
+        "has_transcript": has_transcript,
+        "has_portrait": has_portrait,
+        "has_classification": has_classification,
+        "updated_at": updated_at,
+        "portrait_url": portrait_url,
+    }
+
+
+def _read_json_list(path: Path) -> Optional[list]:
+    """Return the parsed JSON array at ``path``, or ``None`` if absent/bad."""
+    if not path.is_file():
+        return None
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as exc:
+        logger.warning("%s unreadable (%s)", path, exc)
+        return None
+    return raw if isinstance(raw, list) else None
+
+
+def _folder_mtime_iso(folder: Path) -> Optional[str]:
+    """Return the most-recent mtime of ``folder`` or any file in it, as ISO.
+
+    Best-available timestamp for a session with no live_state.json. Falls back
+    gracefully (``None``) if the folder cannot be stat'd at all.
+    """
+    mtimes = []
+    try:
+        mtimes.append(folder.stat().st_mtime)
+    except OSError:
+        pass
+    try:
+        for child in folder.iterdir():
+            try:
+                mtimes.append(child.stat().st_mtime)
+            except OSError:
+                continue
+    except OSError:
+        pass
+    if not mtimes:
+        return None
+    return datetime.fromtimestamp(max(mtimes), tz=timezone.utc).isoformat()
+
+
+def read_sessions_index(*, sessions_dir: Optional[Path] = None) -> dict:
+    """Return the index of every session folder under the sessions root.
+
+    Enumerates each immediate sub-directory of ``SESSIONS_DIR`` whose name is a
+    safe session id, builds a :func:`_summarize_session` summary for each, and
+    returns ``{"sessions": [...]}`` sorted most-recent-first by ``updated_at``.
+
+    A missing or empty sessions root degrades to ``{"sessions": []}`` — never
+    raises, so the dev dashboard always has a uniform shape to parse.
+    """
+    root = sessions_dir if sessions_dir is not None else sessions_root()
+    root = Path(root)
+
+    summaries: list[dict] = []
+    try:
+        children = list(root.iterdir())
+    except (FileNotFoundError, NotADirectoryError, OSError):
+        return {"sessions": []}
+
+    for child in children:
+        if not child.is_dir():
+            continue
+        if not _is_safe_session_id(child.name):
+            continue
+        try:
+            summaries.append(_summarize_session(child))
+        except Exception as exc:  # a partial folder must never break the index
+            logger.warning("session %s: summary failed (%s)", child.name, exc)
+
+    # Most-recent first. ``updated_at`` is an ISO-8601 string (or None) — ISO
+    # strings sort chronologically lexically; None sorts last.
+    summaries.sort(key=lambda s: s.get("updated_at") or "", reverse=True)
+    return {"sessions": summaries}
+
+
 # --- The per-session portrait page ------------------------------------------
 
 _PORTRAIT_PAGE = """<!DOCTYPE html>
@@ -308,11 +499,20 @@ class DeliveryHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def _send_bytes(
-        self, body: bytes, content_type: str, status: HTTPStatus = HTTPStatus.OK
+        self,
+        body: bytes,
+        content_type: str,
+        status: HTTPStatus = HTTPStatus.OK,
+        *,
+        cors: bool = False,
     ) -> None:
         self.send_response(status)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
+        # The dev detail view fetches per-session JSON artifacts cross-origin;
+        # callers serving those pass cors=True for the permissive headers.
+        if cors:
+            self._send_cors_headers()
         self.end_headers()
         if self.command != "HEAD":
             self.wfile.write(body)
@@ -341,6 +541,11 @@ class DeliveryHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802
         # Strip any query string; we route on the path only.
         path = self.path.split("?", 1)[0]
+
+        # GET /sessions — the index of every session folder on this machine.
+        if path.rstrip("/") == "/sessions":
+            self._handle_sessions_index()
+            return
 
         # GET /status/<session-id>
         if path.startswith("/status/"):
@@ -374,14 +579,31 @@ class DeliveryHandler(BaseHTTPRequestHandler):
 
         if not remainder:
             self._handle_portrait_page(session_id, folder)
-        elif remainder == [PORTRAIT_FILENAME]:
-            self._handle_file(folder / PORTRAIT_FILENAME, "image/png")
-        elif remainder == [QR_FILENAME]:
-            self._handle_file(folder / QR_FILENAME, "image/png")
+        elif len(remainder) == 1 and remainder[0] in _IMAGE_ARTIFACTS:
+            # An image artifact — portrait.png / qr.png.
+            self._handle_file(folder / remainder[0], _IMAGE_ARTIFACTS[remainder[0]])
+        elif len(remainder) == 1 and remainder[0] in _JSON_ARTIFACTS:
+            # A known JSON artifact — transcript.json, classification.json, etc.
+            # The filename is checked against the allowlist, so it is a single
+            # plain name with no separators: a ``../`` escape cannot reach here.
+            self._handle_file(
+                folder / remainder[0],
+                "application/json; charset=utf-8",
+                cors=True,
+            )
         else:
             self._send_error_page(HTTPStatus.NOT_FOUND, "not found")
 
     # -- handlers ------------------------------------------------------------
+
+    def _handle_sessions_index(self) -> None:
+        """GET /sessions — the index of every session folder, never 500.
+
+        A missing/empty sessions root degrades to ``{"sessions": []}``. Sends
+        the same permissive CORS headers as /status and /live so the dev
+        dashboard can fetch it cross-origin.
+        """
+        self._send_json(read_sessions_index())
 
     def _handle_status(self, session_id: str) -> None:
         """GET /status/<session-id> — pipeline progress JSON, never 500."""
@@ -439,7 +661,9 @@ class DeliveryHandler(BaseHTTPRequestHandler):
             _PORTRAIT_PAGE.encode("utf-8"), "text/html; charset=utf-8"
         )
 
-    def _handle_file(self, file_path: Path, content_type: str) -> None:
+    def _handle_file(
+        self, file_path: Path, content_type: str, *, cors: bool = False
+    ) -> None:
         """Serve a per-session file, 404 if it does not exist yet."""
         if not file_path.is_file():
             self._send_error_page(HTTPStatus.NOT_FOUND, "file not found")
@@ -451,7 +675,7 @@ class DeliveryHandler(BaseHTTPRequestHandler):
                 HTTPStatus.INTERNAL_SERVER_ERROR, f"could not read file: {exc}"
             )
             return
-        self._send_bytes(body, content_type)
+        self._send_bytes(body, content_type, cors=cors)
 
 
 # --- The server -------------------------------------------------------------
