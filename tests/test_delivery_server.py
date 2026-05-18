@@ -22,6 +22,7 @@ from http import HTTPStatus
 import pytest
 
 from delivery.server import (
+    STALE_STATUS_SECONDS,
     build_server,
     read_live_state,
     read_sessions_index,
@@ -155,6 +156,116 @@ def test_read_status_corrupt_json_degrades(sessions_dir) -> None:
     status = read_status("sess-bad", sessions_dir=sessions_dir)
     assert status["stage"] == "error"
     assert status["error"]
+
+
+# ---------------------------------------------------------------------------
+# Stale-run detection — an in-progress status.json whose worker process died
+# ---------------------------------------------------------------------------
+
+
+def _write_status_with_updated_at(folder, stage, updated_at, error=None):
+    """Write a status.json carrying an explicit updated_at timestamp."""
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / "status.json").write_text(
+        json.dumps(
+            {
+                "session_id": folder.name,
+                "stage": stage,
+                "error": error,
+                "updated_at": updated_at,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+def test_read_status_stale_in_progress_reads_as_error(sessions_dir) -> None:
+    """An in-progress status.json that has gone stale reads as 'error'.
+
+    The live bug: the worker died mid-fill, status.json froze at
+    {"stage": "filling", "error": null}. A poll long after must resolve to a
+    terminal state, not spin forever.
+    """
+    import datetime as _dt
+
+    stale = (
+        _dt.datetime.now(_dt.timezone.utc)
+        - _dt.timedelta(seconds=STALE_STATUS_SECONDS + 120)
+    ).isoformat()
+    _write_status_with_updated_at(sessions_dir / "sess-stale", "filling", stale)
+
+    status = read_status("sess-stale", sessions_dir=sessions_dir)
+    assert status["stage"] == "error"
+    assert status["error"]  # non-null — explains the stall
+    assert "filling" in status["error"]
+
+
+def test_read_status_fresh_in_progress_stays_in_progress(sessions_dir) -> None:
+    """A recently-updated in-progress status.json is left as-is — still working."""
+    import datetime as _dt
+
+    fresh = _dt.datetime.now(_dt.timezone.utc).isoformat()
+    _write_status_with_updated_at(sessions_dir / "sess-fresh", "filling", fresh)
+
+    status = read_status("sess-fresh", sessions_dir=sessions_dir)
+    assert status["stage"] == "filling"
+    assert status["error"] is None
+
+
+def test_read_status_stale_done_is_not_aged_out(sessions_dir) -> None:
+    """A terminal stage is never aged out, however old it is."""
+    import datetime as _dt
+
+    old = (
+        _dt.datetime.now(_dt.timezone.utc)
+        - _dt.timedelta(seconds=STALE_STATUS_SECONDS * 5)
+    ).isoformat()
+    _write_status_with_updated_at(sessions_dir / "sess-old-done", "done", old)
+
+    status = read_status("sess-old-done", sessions_dir=sessions_dir)
+    assert status["stage"] == "done"
+
+
+def test_read_status_stale_uses_mtime_when_no_timestamp(sessions_dir) -> None:
+    """An in-progress status.json with no updated_at ages off its file mtime."""
+    import os
+    import time
+
+    folder = sessions_dir / "sess-no-ts"
+    _write_status(folder, "rendering")  # no updated_at field
+    # Backdate the file's mtime well past the stale threshold.
+    old = time.time() - (STALE_STATUS_SECONDS + 300)
+    os.utime(folder / "status.json", (old, old))
+
+    status = read_status("sess-no-ts", sessions_dir=sessions_dir)
+    assert status["stage"] == "error"
+    assert status["error"]
+
+
+def test_stale_status_endpoint_keeps_contract_shape(server, sessions_dir) -> None:
+    """A stale run still answers GET /status with the kiosk-facing shape.
+
+    Fix 1 must stay compatible with the kiosk: a stale-detected run reports
+    stage 'error' (which CompleteScreen already handles) and the exact same
+    five-key payload, never an extra field or a 500.
+    """
+    import datetime as _dt
+
+    stale = (
+        _dt.datetime.now(_dt.timezone.utc)
+        - _dt.timedelta(seconds=STALE_STATUS_SECONDS + 60)
+    ).isoformat()
+    _write_status_with_updated_at(sessions_dir / "sess-stale-http", "filling", stale)
+
+    code, body, ctype = _get(f"{server}/status/sess-stale-http")
+    assert code == HTTPStatus.OK
+    assert "application/json" in ctype
+    payload = json.loads(body)
+    assert set(payload) == {
+        "session_id", "stage", "portrait_url", "qr_url", "error"
+    }
+    assert payload["stage"] == "error"
+    assert payload["error"]
 
 
 # ---------------------------------------------------------------------------

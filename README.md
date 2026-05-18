@@ -92,11 +92,19 @@ NEXT_PUBLIC_DELIVERY_SERVER_URL=http://<LAN-IP>:8808
 uv run python -m delivery.server
 
 # agent worker — the LiveKit voice interviewer
-uv run python -m agent.main dev
+uv run python -m agent.main start
 
 # kiosk frontend
 cd kiosk && npm install && npm run dev
 ```
+
+For a real kiosk run the agent worker with **`start`**, the production worker —
+not `dev`. The `dev` subcommand is for development: it adds file-watching and
+hot-reload, which restart the worker on any source change, so it is not a
+durable long-running process. If a `dev` worker is restarted (or simply stops)
+while an interview's offline pipeline is still running, that pipeline is
+orphaned mid-stage. Use `dev` while developing; use `start` for anything a
+visitor will actually use.
 
 **3. Open the kiosk** at `http://localhost:3000`. Press begin, allow the
 microphone, and have the interview. When it ends, the screen shows a
