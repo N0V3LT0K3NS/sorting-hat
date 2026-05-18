@@ -75,6 +75,12 @@ Test these **before** the happy path, so a calm failure is proven first.
 - [ ] Hold a short back-and-forth with the agent. Latency from end-of-your-
       speech to start-of-agent-speech feels conversational.
 - [ ] The waveform reacts to the agent's voice; the speaking dot pulses.
+- [ ] The progress arc below the state label fills gently as the minutes
+      pass, with an understated minute count beneath it — a calm sense of
+      building, no countdown or pressure.
+- [ ] The unobtrusive _End_ control at the bottom centre ends the session:
+      pressing it advances to the Complete screen and the kiosk resets to
+      Idle, exactly as an agent-ended interview does.
 - [ ] (Dev only) Tap the hidden bottom-right hotspot — the developer
       transcript view toggles. Tap again to hide it. This is for field
       debugging only and is invisible to visitors.
