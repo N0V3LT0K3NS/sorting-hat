@@ -94,6 +94,11 @@ Run **each** ending and confirm the kiosk returns cleanly to Idle:
       After ~30 seconds the agent-join watchdog ends the session and the
       kiosk returns to Idle — it does not hang on "Connecting…".
 
+> **Regression watch:** pressing _begin_ must show the Active screen and
+> attempt to connect — it must **not** jump straight to Complete. The
+> initial/Connecting connection state is not a disconnect; only a drop
+> *after* the room has connected ends the session.
+
 ## 7. Back-to-back sessions — no state leak
 
 - [ ] Run **three interviews in a row** without reloading the page.

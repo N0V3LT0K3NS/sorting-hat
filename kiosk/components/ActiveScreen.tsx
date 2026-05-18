@@ -28,10 +28,21 @@ export function ActiveScreen({ onComplete }: { onComplete: () => void }) {
   const [agentTimedOut, setAgentTimedOut] = useState(false);
   // Whether the agent has been observed in the room at least once.
   const agentSeen = useRef(false);
+  // Whether the room has reached Connected at least once. Guards against the
+  // initial Disconnected value of useConnectionState() being mistaken for the
+  // interview ending the instant this screen mounts.
+  const hasConnected = useRef(false);
 
   // When the room disconnects, the interview is over -> Complete screen.
+  // The initial Disconnected state (and Connecting) is inert: only a
+  // disconnect *after* a genuine Connected counts as the session ending.
   useEffect(() => {
-    if (connectionState === ConnectionState.Disconnected) {
+    if (connectionState === ConnectionState.Connected) {
+      hasConnected.current = true;
+    } else if (
+      connectionState === ConnectionState.Disconnected &&
+      hasConnected.current
+    ) {
       onComplete();
     }
   }, [connectionState, onComplete]);
