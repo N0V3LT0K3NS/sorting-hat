@@ -24,7 +24,10 @@ of `SESSIONS_DIR` (default `./sessions`). Both are read from the environment
 | `GET /<session-id>/portrait.png` | the rendered portrait PNG |
 | `GET /<session-id>/qr.png` | the QR-code PNG |
 | `GET /<session-id>/` | a minimal mobile page showing the portrait full-bleed, with a download button — **this is the page the QR points a phone at** |
+| `GET /<session-id>/<file>.json` | a per-session JSON artifact (below) |
 | `GET /status/<session-id>` | pipeline-progress JSON (below) |
+| `GET /live/<session-id>` | live interview-state JSON, polled during an interview |
+| `GET /sessions` | the index of *every* session folder on this machine (below) |
 
 The status endpoint returns:
 
@@ -43,6 +46,51 @@ The status endpoint returns:
 A session folder (or `status.json`) that does not exist yet degrades to stage
 `pending` — never a 500. The kiosk polls `/status/<session-id>` while the
 pipeline runs and switches to the portrait + QR once `stage` is `done`.
+
+## The sessions index — `GET /sessions`
+
+The dev dashboard's session list. It enumerates every session folder under
+`SESSIONS_DIR` and returns one summary per interview — active and past:
+
+```json
+{
+  "sessions": [
+    {
+      "session_id": "<folder name>",
+      "phase": "pending|base_questions|probing|complete|unknown",
+      "pipeline_stage": "pending|classifying|filling|rendering|delivering|done|error  or null",
+      "turn_count": 0,
+      "chosen_template": "iceberg|two_buttons|compass|arc  or null",
+      "has_transcript": true,
+      "has_portrait": false,
+      "has_classification": false,
+      "updated_at": "<ISO-8601 timestamp>",
+      "portrait_url": "/<session-id>/portrait.png  or null"
+    }
+  ]
+}
+```
+
+Each field is read from whatever JSON files the folder happens to hold —
+`live_state.json` (`phase`, `turn_count`, `chosen_template`, `updated_at`),
+`status.json` (`pipeline_stage`), `interview_state.json` (`chosen_template`
+fallback), `transcript.json` (`turn_count` fallback). A folder with only a
+partial set of files is summarised gracefully — never a 500. `phase` is
+`unknown` (not `pending`) when there is no `live_state.json` at all;
+`pipeline_stage` is `null` when there is no `status.json`. Summaries are
+sorted most-recent-first by `updated_at`; a session with no `live_state.json`
+falls back to the folder's most-recent file mtime. A missing or empty
+`SESSIONS_DIR` returns `{"sessions": []}`, not an error.
+
+## Per-session JSON artifacts — `GET /<session-id>/<file>.json`
+
+So a dev detail view can fetch a past interview's transcript, the server
+serves the known JSON artifacts directly out of a session folder:
+`transcript.json`, `interview_state.json`, `classification.json`,
+`result.json`, `live_state.json`, `status.json`. The filename is checked
+against a fixed allowlist — only those six names are served, so a `../`
+path-traversal attempt can never reach outside the session folder. A request
+for a file the session does not have yet 404s gracefully.
 
 ## It must run on the kiosk machine
 

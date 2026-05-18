@@ -21,7 +21,12 @@ from http import HTTPStatus
 
 import pytest
 
-from delivery.server import build_server, read_live_state, read_status
+from delivery.server import (
+    build_server,
+    read_live_state,
+    read_sessions_index,
+    read_status,
+)
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -412,3 +417,253 @@ def test_options_preflight_answered(server, sessions_dir) -> None:
     assert headers.get("Access-Control-Allow-Origin") == "*"
     assert "GET" in (headers.get("Access-Control-Allow-Methods") or "")
     assert body == b""
+
+
+# ---------------------------------------------------------------------------
+# Fixture session folders for the sessions index
+# ---------------------------------------------------------------------------
+
+_INDEX_KEYS = {
+    "session_id", "phase", "pipeline_stage", "turn_count", "chosen_template",
+    "has_transcript", "has_portrait", "has_classification", "updated_at",
+    "portrait_url",
+}
+
+
+def _write_transcript(folder, turns):
+    """Write a transcript.json into ``folder`` — a list of turn dicts."""
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / "transcript.json").write_text(
+        json.dumps([{"speaker": s, "text": t} for s, t in turns]),
+        encoding="utf-8",
+    )
+
+
+def _build_index_fixture(root):
+    """Populate ``root`` with three sessions at different stages of life.
+
+    * ``sess-transcript-only`` — only a transcript.json (an interview started
+      but produced no live_state).
+    * ``sess-mid`` — mid-interview: a live_state.json + transcript.json.
+    * ``sess-complete`` — finished: live_state + status.json + portrait.png +
+      classification.json + transcript.json.
+    """
+    only = root / "sess-transcript-only"
+    _write_transcript(only, [("interviewer", "hi"), ("interviewee", "hello")])
+
+    mid = root / "sess-mid"
+    _write_live_state(
+        mid,
+        phase="probing",
+        turn_count=6,
+        updated_at="2026-05-18T10:00:00+00:00",
+    )
+    _write_transcript(mid, [("interviewer", "q")] * 6)
+
+    done = root / "sess-complete"
+    _write_live_state(
+        done,
+        phase="complete",
+        routing_done=True,
+        chosen_template="compass",
+        turn_count=12,
+        updated_at="2026-05-18T14:00:00+00:00",
+    )
+    _write_transcript(done, [("interviewer", "q")] * 12)
+    _write_status(done, "done")
+    (done / "portrait.png").write_bytes(b"\x89PNG portrait")
+    (done / "classification.json").write_text(
+        json.dumps({"template": "compass"}), encoding="utf-8"
+    )
+    return only, mid, done
+
+
+# ---------------------------------------------------------------------------
+# read_sessions_index — the pure function
+# ---------------------------------------------------------------------------
+
+
+def test_read_sessions_index_empty_root(sessions_dir) -> None:
+    """An empty sessions root yields {'sessions': []} — never raises."""
+    assert read_sessions_index(sessions_dir=sessions_dir) == {"sessions": []}
+
+
+def test_read_sessions_index_missing_root(tmp_path) -> None:
+    """A missing sessions root yields {'sessions': []}, not an error."""
+    missing = tmp_path / "no-such-dir"
+    assert read_sessions_index(sessions_dir=missing) == {"sessions": []}
+
+
+def test_read_sessions_index_summarizes_each_folder(sessions_dir) -> None:
+    """Every session folder gets a summary with the documented field set."""
+    _build_index_fixture(sessions_dir)
+    index = read_sessions_index(sessions_dir=sessions_dir)
+    sessions = index["sessions"]
+    assert len(sessions) == 3
+    for summary in sessions:
+        assert set(summary) == _INDEX_KEYS
+    by_id = {s["session_id"]: s for s in sessions}
+
+    # transcript-only: no live_state -> phase 'unknown', no status -> null.
+    only = by_id["sess-transcript-only"]
+    assert only["phase"] == "unknown"
+    assert only["pipeline_stage"] is None
+    assert only["turn_count"] == 2  # counted from transcript.json
+    assert only["chosen_template"] is None
+    assert only["has_transcript"] is True
+    assert only["has_portrait"] is False
+    assert only["has_classification"] is False
+    assert only["portrait_url"] is None
+
+    # mid-interview: phase from live_state, turn_count from live_state.
+    mid = by_id["sess-mid"]
+    assert mid["phase"] == "probing"
+    assert mid["pipeline_stage"] is None
+    assert mid["turn_count"] == 6
+    assert mid["has_portrait"] is False
+
+    # complete: full set of files.
+    done = by_id["sess-complete"]
+    assert done["phase"] == "complete"
+    assert done["pipeline_stage"] == "done"
+    assert done["turn_count"] == 12
+    assert done["chosen_template"] == "compass"
+    assert done["has_transcript"] is True
+    assert done["has_portrait"] is True
+    assert done["has_classification"] is True
+    assert done["portrait_url"] == "/sess-complete/portrait.png"
+
+
+def test_read_sessions_index_sorted_most_recent_first(sessions_dir) -> None:
+    """Summaries are ordered most-recent-first by updated_at."""
+    _build_index_fixture(sessions_dir)
+    sessions = read_sessions_index(sessions_dir=sessions_dir)["sessions"]
+    updated = [s["updated_at"] for s in sessions]
+    assert updated == sorted(updated, reverse=True)
+    # sess-complete (14:00) is more recent than sess-mid (10:00).
+    ids = [s["session_id"] for s in sessions]
+    assert ids.index("sess-complete") < ids.index("sess-mid")
+
+
+# ---------------------------------------------------------------------------
+# GET /sessions over HTTP
+# ---------------------------------------------------------------------------
+
+
+def test_sessions_endpoint_lists_all_folders(server, sessions_dir) -> None:
+    """GET /sessions returns every session folder with the summary shape."""
+    _build_index_fixture(sessions_dir)
+    code, body, ctype = _get(f"{server}/sessions")
+    assert code == HTTPStatus.OK
+    assert "application/json" in ctype
+    payload = json.loads(body)
+    assert set(payload) == {"sessions"}
+    assert len(payload["sessions"]) == 3
+    for summary in payload["sessions"]:
+        assert set(summary) == _INDEX_KEYS
+
+
+def test_sessions_endpoint_empty_root_no_500(server, sessions_dir) -> None:
+    """GET /sessions on an empty root returns {'sessions': []}, never a 500."""
+    code, body, _ = _get(f"{server}/sessions")
+    assert code == HTTPStatus.OK
+    assert json.loads(body) == {"sessions": []}
+
+
+def test_sessions_endpoint_sorted_most_recent_first(server, sessions_dir) -> None:
+    """GET /sessions returns the summaries sorted most-recent-first."""
+    _build_index_fixture(sessions_dir)
+    code, body, _ = _get(f"{server}/sessions")
+    assert code == HTTPStatus.OK
+    sessions = json.loads(body)["sessions"]
+    updated = [s["updated_at"] for s in sessions]
+    assert updated == sorted(updated, reverse=True)
+
+
+def test_sessions_endpoint_cors_header(server, sessions_dir) -> None:
+    """GET /sessions sends the permissive CORS header for the dev dashboard."""
+    _build_index_fixture(sessions_dir)
+    code, _, headers = _request(f"{server}/sessions")
+    assert code == HTTPStatus.OK
+    assert headers.get("Access-Control-Allow-Origin") == "*"
+
+
+# ---------------------------------------------------------------------------
+# Per-session JSON artifacts — GET /<id>/<file>.json
+# ---------------------------------------------------------------------------
+
+
+def test_serves_transcript_json(server, sessions_dir) -> None:
+    """GET /<id>/transcript.json serves the transcript a dev view can fetch."""
+    folder = sessions_dir / "sess-txt"
+    turns = [("interviewer", "q1"), ("interviewee", "a1")]
+    _write_transcript(folder, turns)
+    code, body, ctype = _get(f"{server}/sess-txt/transcript.json")
+    assert code == HTTPStatus.OK
+    assert "application/json" in ctype
+    payload = json.loads(body)
+    assert payload == [{"speaker": s, "text": t} for s, t in turns]
+
+
+def test_serves_known_json_artifacts(server, sessions_dir) -> None:
+    """Each allowlisted JSON artifact is fetchable from a session folder."""
+    folder = sessions_dir / "sess-artifacts"
+    folder.mkdir(parents=True)
+    for name in (
+        "interview_state.json", "classification.json", "result.json",
+        "live_state.json", "status.json",
+    ):
+        (folder / name).write_text(json.dumps({"name": name}), encoding="utf-8")
+    for name in (
+        "interview_state.json", "classification.json", "result.json",
+        "live_state.json", "status.json",
+    ):
+        code, body, _ = _get(f"{server}/sess-artifacts/{name}")
+        assert code == HTTPStatus.OK, name
+        assert json.loads(body) == {"name": name}
+
+
+def test_json_artifact_cors_header(server, sessions_dir) -> None:
+    """A per-session JSON artifact carries the permissive CORS header."""
+    folder = sessions_dir / "sess-jcors"
+    _write_transcript(folder, [("interviewer", "q")])
+    code, _, headers = _request(f"{server}/sess-jcors/transcript.json")
+    assert code == HTTPStatus.OK
+    assert headers.get("Access-Control-Allow-Origin") == "*"
+
+
+def test_missing_json_artifact_404s(server, sessions_dir) -> None:
+    """A request for a JSON artifact the session lacks 404s, no crash."""
+    (sessions_dir / "sess-no-txt").mkdir(parents=True)
+    code, _, _ = _get(f"{server}/sess-no-txt/transcript.json")
+    assert code == HTTPStatus.NOT_FOUND
+
+
+def test_non_allowlisted_file_not_served(server, sessions_dir) -> None:
+    """A file outside the allowlist is not served — 404, not the bytes."""
+    folder = sessions_dir / "sess-secret"
+    folder.mkdir(parents=True)
+    (folder / "secret.txt").write_text("hunter2", encoding="utf-8")
+    code, _, _ = _get(f"{server}/sess-secret/secret.txt")
+    assert code == HTTPStatus.NOT_FOUND
+
+
+def test_path_traversal_rejected(server, sessions_dir) -> None:
+    """A ../ traversal attempt is rejected — never reaches outside the folder.
+
+    A secret file is planted one level above the sessions root; an attempt to
+    reach it via an encoded ``../`` path must not return its bytes.
+    """
+    secret = sessions_dir.parent / "transcript.json"
+    secret.write_text(json.dumps([{"speaker": "x", "text": "TOPSECRET"}]),
+                       encoding="utf-8")
+    for attack in (
+        "/sess/..%2Ftranscript.json",
+        "/..%2Ftranscript.json",
+        "/sess/../transcript.json",
+    ):
+        code, body, _ = _get(f"{server}{attack}")
+        assert code in (
+            HTTPStatus.BAD_REQUEST, HTTPStatus.NOT_FOUND, HTTPStatus.OK
+        )
+        assert b"TOPSECRET" not in body
