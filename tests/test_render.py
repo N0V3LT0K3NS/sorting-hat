@@ -1,30 +1,38 @@
 """Unit tests for the offline rendering stage (``pipeline/render.py``).
 
-No test in this file touches the network or an LLM. Rendering is stage 3 of
-the offline pipeline: given a filled typed result it composites slot text
-onto the matching base meme image and produces a portrait PNG.
+Render is stage 3 of the offline pipeline: given a filled typed result it
+produces the final meme portrait. The real renderer sends a meme-template
+image plus a per-template fill prompt to OpenAI's gpt-image-2 image model.
 
-Coverage:
-* :func:`render` produces a valid, non-empty, sensibly-sized PNG for each of
-  the four templates, given a sample filled result;
-* ``render`` returns a :class:`PIL.Image.Image` when no path is given and
-  writes a PNG file when a path is given;
-* long slot values (at the char-limit ceiling and beyond) do not crash
-  rendering — text wraps and shrinks to fit;
+**No test here touches the network or spends on a real image call.** The
+OpenAI image API is mocked throughout. Coverage:
+
+* :func:`render` builds the correct per-template fill prompt, containing
+  the typed result's slot text;
+* with a mocked API, ``render`` returns a :class:`PIL.Image.Image` and
+  writes a PNG file when given a path;
+* a missing ``OPENAI_API_KEY`` triggers the Pillow fallback — no crash;
+* an API failure triggers the Pillow fallback — no crash;
 * an unrecognised result type raises a clear :class:`RenderError`;
-* the four base images exist in ``assets/templates/``.
+* the three real reference template images exist.
 """
 
 from __future__ import annotations
 
 import io
-from pathlib import Path
 
 import pytest
 from PIL import Image
 
 from agent.state import ArcResult, CompassResult, IcebergResult, TwoButtonsResult
-from pipeline.render import HEIGHT, TEMPLATES_DIR, WIDTH, RenderError, render
+from pipeline.render import (
+    HEIGHT,
+    REFERENCE_DIR,
+    WIDTH,
+    RenderError,
+    build_prompt,
+    render,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -47,7 +55,7 @@ def sample_two_buttons() -> TwoButtonsResult:
         button_a_seduction="The work is finally compounding and walking now wastes a decade.",
         button_b_label="Leave and breathe",
         button_b_seduction="A clean exit is the only thing that has felt honest in months.",
-        impossibility="Every month spent deciding is itself the decision, and both doors quietly close.",
+        impossibility="Every month spent deciding is itself the decision, and both doors close.",
     )
 
 
@@ -82,58 +90,150 @@ SAMPLES = {
 
 
 # ---------------------------------------------------------------------------
-# Base images exist
+# Mock OpenAI image client
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize(
-    "filename", ["iceberg.png", "compass.png", "two_buttons.png", "arc.png"]
-)
-def test_base_image_exists(filename):
-    """Each of the four base template PNGs is present and openable."""
-    path = TEMPLATES_DIR / filename
-    assert path.exists(), f"missing base image: {path}"
+def _fake_png_b64() -> str:
+    """A real, decodable 1x1 PNG encoded as base64 — stand-in for a render."""
+    import base64
+
+    buf = io.BytesIO()
+    Image.new("RGB", (WIDTH, HEIGHT), (123, 45, 67)).save(buf, "PNG")
+    return base64.b64encode(buf.getvalue()).decode("ascii")
+
+
+class _MockImageData:
+    def __init__(self, b64: str) -> None:
+        self.b64_json = b64
+
+
+class _MockImageResponse:
+    def __init__(self, b64: str) -> None:
+        self.data = [_MockImageData(b64)]
+
+
+class _MockImages:
+    """Stands in for ``client.images``; records the edit() call arguments."""
+
+    def __init__(self, fail: bool = False) -> None:
+        self.fail = fail
+        self.calls: list[dict] = []
+
+    def edit(self, **kwargs):
+        self.calls.append(kwargs)
+        if self.fail:
+            raise RuntimeError("simulated gpt-image-2 API failure")
+        return _MockImageResponse(_fake_png_b64())
+
+
+class MockOpenAIClient:
+    """A minimal mock OpenAI client exposing ``.images.edit(...)``."""
+
+    def __init__(self, fail: bool = False) -> None:
+        self.images = _MockImages(fail=fail)
+
+
+# ---------------------------------------------------------------------------
+# Reference template images exist
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("filename", ["iceberg.jpg", "two_buttons.jpg", "arc.jpg"])
+def test_reference_image_exists(filename):
+    """Each real reference meme-template jpg is present and openable."""
+    path = REFERENCE_DIR / filename
+    assert path.exists(), f"missing reference image: {path}"
     with Image.open(path) as img:
         img.verify()
 
 
 # ---------------------------------------------------------------------------
-# render() produces a valid PNG for each template
+# Per-template fill prompts contain the result's slot text
+# ---------------------------------------------------------------------------
+
+
+def test_iceberg_prompt_contains_all_layers():
+    """The iceberg prompt embeds all four depth-layer slot texts verbatim."""
+    r = sample_iceberg()
+    prompt = build_prompt(r)
+    assert r.surface in prompt
+    assert r.first_layer in prompt
+    assert r.second_layer in prompt
+    assert r.abyss in prompt
+    assert "iceberg" in prompt.lower()
+
+
+def test_two_buttons_prompt_contains_labels_and_caption():
+    """The two-buttons prompt embeds both button labels and the impossibility."""
+    r = sample_two_buttons()
+    prompt = build_prompt(r)
+    assert r.button_a_label in prompt
+    assert r.button_b_label in prompt
+    assert r.impossibility in prompt
+    assert "LEFT" in prompt and "RIGHT" in prompt
+
+
+def test_arc_prompt_contains_all_panels():
+    """The arc prompt embeds all four ascending-panel captions verbatim."""
+    r = sample_arc()
+    prompt = build_prompt(r)
+    assert r.before in prompt
+    assert r.catalyst in prompt
+    assert r.middle in prompt
+    assert r.after in prompt
+
+
+def test_compass_prompt_contains_poles_and_caption():
+    """The compass prompt embeds the four pole labels and the axes caption."""
+    r = sample_compass()
+    prompt = build_prompt(r)
+    for pole in (*r.axis_1_poles, *r.axis_2_poles):
+        assert pole in prompt
+    assert r.why_these_axes in prompt
+
+
+def test_build_prompt_rejects_unknown_type():
+    """build_prompt raises RenderError for a non-typed-result object."""
+    with pytest.raises(RenderError):
+        build_prompt(object())
+
+
+# ---------------------------------------------------------------------------
+# render() with a mocked OpenAI client
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize("name", sorted(SAMPLES))
-def test_render_returns_image(name):
-    """render() returns a PIL Image of the canvas dimensions for each template."""
-    result = SAMPLES[name]()
-    img = render(result)
+def test_render_returns_image_with_mock_client(name):
+    """With a mocked gpt-image-2 client, render() returns a PIL Image."""
+    client = MockOpenAIClient()
+    img = render(SAMPLES[name](), client=client)
     assert isinstance(img, Image.Image)
-    assert img.size == (WIDTH, HEIGHT)
     assert img.width > 0 and img.height > 0
+    # The mock client's edit() was actually called once.
+    assert len(client.images.calls) == 1
 
 
 @pytest.mark.parametrize("name", sorted(SAMPLES))
-def test_render_produces_valid_png_bytes(name):
-    """The rendered image encodes to non-empty, valid PNG bytes."""
-    img = render(SAMPLES[name]())
-    buffer = io.BytesIO()
-    img.save(buffer, "PNG")
-    data = buffer.getvalue()
-    assert len(data) > 0
-    assert data[:8] == b"\x89PNG\r\n\x1a\n", "output is not a PNG"
-
-    # Round-trip: the bytes re-open as a sensible image.
-    reopened = Image.open(io.BytesIO(data))
-    reopened.load()
-    assert reopened.format == "PNG"
-    assert reopened.size == (WIDTH, HEIGHT)
+def test_render_sends_correct_prompt_to_api(name):
+    """render() passes the per-template fill prompt (with slot text) to edit()."""
+    client = MockOpenAIClient()
+    result = SAMPLES[name]()
+    render(result, client=client)
+    call = client.images.calls[0]
+    assert call["prompt"] == build_prompt(result)
+    assert call["quality"] == "high"
+    # gpt-image-2 does NOT accept input_fidelity — it must not be sent.
+    assert "input_fidelity" not in call
 
 
 @pytest.mark.parametrize("name", sorted(SAMPLES))
-def test_render_writes_png_file(tmp_path, name):
+def test_render_writes_png_file_with_mock_client(tmp_path, name):
     """When given a path, render() writes a non-empty PNG and returns the path."""
+    client = MockOpenAIClient()
     out = tmp_path / f"{name}.png"
-    returned = render(SAMPLES[name](), out_path=out)
+    returned = render(SAMPLES[name](), out_path=out, client=client)
     assert returned == out
     assert out.exists()
     assert out.stat().st_size > 0
@@ -143,78 +243,72 @@ def test_render_writes_png_file(tmp_path, name):
 
 def test_render_creates_missing_output_dir(tmp_path):
     """render() creates parent directories for the output path."""
+    client = MockOpenAIClient()
     out = tmp_path / "nested" / "deep" / "portrait.png"
-    render(sample_arc(), out_path=out)
+    render(sample_arc(), out_path=out, client=client)
     assert out.exists()
 
 
+@pytest.mark.parametrize("name", sorted(SAMPLES))
+def test_render_produces_valid_png_bytes(name):
+    """The image render() returns encodes to non-empty, valid PNG bytes."""
+    client = MockOpenAIClient()
+    img = render(SAMPLES[name](), client=client)
+    buffer = io.BytesIO()
+    img.save(buffer, "PNG")
+    data = buffer.getvalue()
+    assert len(data) > 0
+    assert data[:8] == b"\x89PNG\r\n\x1a\n", "output is not a PNG"
+
+
 # ---------------------------------------------------------------------------
-# Long text does not crash rendering
+# Graceful degradation — missing key and API failure both fall back
 # ---------------------------------------------------------------------------
 
 
-def test_render_iceberg_long_text():
-    """Iceberg layers at the 120-char ceiling render without crashing."""
-    long = "x" * 120
-    spaced = ("word " * 24).strip()[:120]
+@pytest.mark.parametrize("name", sorted(SAMPLES))
+def test_missing_api_key_triggers_pillow_fallback(monkeypatch, name):
+    """No OPENAI_API_KEY -> Pillow fallback render, no crash, valid image."""
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    # No client injected and no key -> get_openai_client returns None.
+    img = render(SAMPLES[name]())
+    assert isinstance(img, Image.Image)
+    assert img.size == (WIDTH, HEIGHT)
+
+
+@pytest.mark.parametrize("name", sorted(SAMPLES))
+def test_api_failure_triggers_pillow_fallback(name):
+    """A gpt-image-2 API failure -> Pillow fallback render, no crash."""
+    client = MockOpenAIClient(fail=True)
+    img = render(SAMPLES[name](), client=client)
+    assert isinstance(img, Image.Image)
+    assert img.size == (WIDTH, HEIGHT)
+    # The failing call was still attempted.
+    assert len(client.images.calls) == 1
+
+
+def test_fallback_writes_png_file(tmp_path, monkeypatch):
+    """The fallback path also honours the out_path write contract."""
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    out = tmp_path / "fallback.png"
+    returned = render(sample_iceberg(), out_path=out)
+    assert returned == out
+    assert out.exists()
+    with Image.open(out) as img:
+        img.verify()
+
+
+def test_fallback_handles_long_text(monkeypatch):
+    """Slot values at the char ceiling do not crash the Pillow fallback."""
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     result = IcebergResult(
-        surface=long,
-        first_layer=spaced,
-        second_layer=long,
-        abyss=spaced,
+        surface="x" * 120,
+        first_layer=("word " * 24).strip()[:120],
+        second_layer="y" * 120,
+        abyss=("deep " * 24).strip()[:120],
     )
     img = render(result)
     assert img.size == (WIDTH, HEIGHT)
-
-
-def test_render_two_buttons_long_text():
-    """Two Buttons fields at their char ceilings render without crashing."""
-    result = TwoButtonsResult(
-        button_a_label="a" * 40,
-        button_a_seduction="seduction " * 16,
-        button_b_label="longwordwithoutanyspaces" + "z" * 16,
-        button_b_seduction="b" * 160,
-        impossibility="impossible " * 18,
-    )
-    img = render(result)
-    assert img.size == (WIDTH, HEIGHT)
-
-
-def test_render_compass_long_text_and_extremes():
-    """Compass with long poles, a 300-char caption and extreme positions."""
-    result = CompassResult(
-        axis_1_poles=("a very long pole name " * 3, "another long pole label here"),
-        axis_1_position=-1.0,
-        axis_2_poles=("p" * 30, "q" * 30),
-        axis_2_position=1.0,
-        why_these_axes="why " * 75,
-    )
-    img = render(result)
-    assert img.size == (WIDTH, HEIGHT)
-
-
-def test_render_arc_long_text():
-    """Arc panels at the 200-char ceiling render without crashing."""
-    long = "y" * 200
-    spaced = ("panel " * 33).strip()[:200]
-    result = ArcResult(before=long, catalyst=spaced, middle=long, after=spaced)
-    img = render(result)
-    assert img.size == (WIDTH, HEIGHT)
-
-
-def test_render_compass_dot_within_bounds_at_extremes():
-    """A corner position still renders (dot stays a finite image, no crash)."""
-    for x in (-1.0, 1.0):
-        for y in (-1.0, 1.0):
-            result = CompassResult(
-                axis_1_poles=("L", "R"),
-                axis_1_position=x,
-                axis_2_poles=("D", "U"),
-                axis_2_position=y,
-                why_these_axes="corner case",
-            )
-            img = render(result)
-            assert img.size == (WIDTH, HEIGHT)
 
 
 # ---------------------------------------------------------------------------
@@ -232,26 +326,3 @@ def test_render_rejects_plain_dict():
     """A dict is not a typed result model and is rejected."""
     with pytest.raises(RenderError):
         render({"surface": "x", "first_layer": "y"})
-
-
-def test_sanitize_replaces_tofu_punctuation():
-    """Em dashes and curly quotes are mapped to ASCII the default font has."""
-    from pipeline.render import _sanitize
-
-    out = _sanitize("a—b “quote” ‘x’ dots…")
-    assert "—" not in out and "“" not in out and "‘" not in out
-    assert "…" not in out
-    assert out.isascii()
-
-
-def test_render_with_em_dash_text_succeeds():
-    """A render whose slot text contains em dashes produces a valid PNG."""
-    result = TwoButtonsResult(
-        button_a_label="Build — alone",
-        button_a_seduction="Be the decision-maker — on your own terms.",
-        button_b_label="Stay — paid",
-        button_b_seduction="Keep the money — the “safe” life.",
-        impossibility="Each path forecloses the other — and time is short.",
-    )
-    img = render(result)
-    assert img.size == (WIDTH, HEIGHT)

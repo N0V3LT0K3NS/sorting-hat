@@ -1,28 +1,34 @@
 """Offline rendering — stage 3 of the pipeline: ``render(typed_result) -> png``.
 
 Stage 1 ``classify`` picks a template; stage 2 ``fill`` returns one of the
-four typed result models from :mod:`agent.state`; this stage composites that
-result's slot text onto the matching base meme image and produces the final
-portrait PNG.
+four typed result models from :mod:`agent.state`; this stage turns that
+result into the final meme portrait PNG.
 
-The renderer is importable and standalone — no LiveKit, no network, no LLM.
-It takes any of ``IcebergResult`` / ``TwoButtonsResult`` / ``CompassResult``
-/ ``ArcResult`` and dispatches to a template-specific layout.
+The renderer is importable and standalone — no LiveKit. It takes any of
+``IcebergResult`` / ``TwoButtonsResult`` / ``CompassResult`` / ``ArcResult``
+and dispatches to a template-specific fill.
 
-The four base images in ``assets/templates/`` are **placeholder bases**
-(see ``assets/templates/_generate_bases.py``). Real meme art can replace
-them later — same filenames, same 1080x1350 portrait dimensions — without
-changing this module: the layout regions below are expressed as fractions
-of the canvas, so they track the base image whatever its pixels are.
+**Render approach.** A real meme-template image (``assets/templates/reference/``)
+plus a per-template text prompt is sent to OpenAI's ``gpt-image-2`` image
+model via the ``images/edits`` endpoint. The model fills the legible meme
+text into the template art and returns a genuine filled meme — far better
+than compositing text onto a placeholder base.
 
-Text is wrapped to fit its layout region; the per-field char limits in
-``agent.state`` keep slot values short, but wrapping is still done here so
-that long values degrade gracefully (shrink-to-fit) rather than overflow.
-A scalable default font is used — no system font path is assumed.
+**Graceful degradation.** Matching the pipeline style (``classify.py`` /
+``fill.py``): importing this module never fails and never touches the
+network. If ``OPENAI_API_KEY`` is missing or the API call fails,
+:func:`render` falls back to a minimal Pillow text render and logs a
+warning — render must never hard-crash the offline pipeline. A typed
+:class:`RenderError` is raised only for truly unrecoverable cases (an
+unknown result type).
 """
 
 from __future__ import annotations
 
+import base64
+import io
+import logging
+import os
 from pathlib import Path
 from typing import Optional, Union
 
@@ -30,80 +36,365 @@ from PIL import Image, ImageDraw, ImageFont
 
 from agent.state import ArcResult, CompassResult, IcebergResult, TwoButtonsResult
 
+logger = logging.getLogger("sorting-hat.render")
+
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
 
-TEMPLATES_DIR = Path(__file__).resolve().parent.parent / "assets" / "templates"
+#: Real meme-template images — the inputs to gpt-image-2's images/edits call.
+REFERENCE_DIR = (
+    Path(__file__).resolve().parent.parent / "assets" / "templates" / "reference"
+)
 
-# Canvas dimensions — must match the generated base images.
-WIDTH = 1080
-HEIGHT = 1350
+#: Environment variable holding the OpenAI API key (powers gpt-image-2).
+API_KEY_ENV = "OPENAI_API_KEY"
 
-# Base image filename per typed-result model.
-_BASE_FILES = {
-    "IcebergResult": "iceberg.png",
-    "TwoButtonsResult": "two_buttons.png",
-    "CompassResult": "compass.png",
-    "ArcResult": "arc.png",
+#: Default render image model. Overridable via ``RENDER_MODEL`` env var.
+DEFAULT_RENDER_MODEL = "gpt-image-2"
+
+#: Portrait output size requested from gpt-image-2 (a size it accepts).
+RENDER_SIZE = "1024x1536"
+
+#: Pillow-fallback canvas dimensions (portrait), used only when the API path
+#: is unavailable. ``test_render`` asserts against these.
+WIDTH = 1024
+HEIGHT = 1536
+
+#: Reference meme-template filename per typed-result model. The compass has
+#: no photographic reference — its base is drawn with Pillow at call time.
+_REFERENCE_FILES = {
+    "IcebergResult": "iceberg.jpg",
+    "TwoButtonsResult": "two_buttons.jpg",
+    "ArcResult": "arc.jpg",
 }
 
 TypedResult = Union[IcebergResult, TwoButtonsResult, CompassResult, ArcResult]
 
 
 class RenderError(Exception):
-    """Raised when a result cannot be rendered (bad type or missing base)."""
+    """Raised when a result cannot be rendered at all (unknown result type)."""
 
 
 # ---------------------------------------------------------------------------
-# Font + text helpers
+# Per-template fill prompts
+# ---------------------------------------------------------------------------
+#
+# Each prompt tells gpt-image-2 exactly what text to place where, while
+# preserving the original meme art and layout — only adding text. The prompt
+# is built from the typed result's fields so the slot text is verbatim.
+
+_PROMPT_PREAMBLE = (
+    "Edit this meme template image. Keep the original artwork, composition, "
+    "colors and layout exactly as they are — do not redraw the scene. Only "
+    "ADD legible text into the template. Use a bold, clean meme font (Impact "
+    "style where appropriate). Every piece of text must be sharp, correctly "
+    "spelled, and easy to read.\n\n"
+)
+
+
+def _build_iceberg_prompt(r: IcebergResult) -> str:
+    """Prompt: four depth layers on the iceberg, white legible text."""
+    return _PROMPT_PREAMBLE + (
+        "This is the iceberg meme. Place white text with a subtle dark "
+        "outline at four depths:\n"
+        f'- On the visible iceberg tip ABOVE the waterline: "{r.surface}"\n'
+        f'- Just BELOW the waterline (first underwater layer): "{r.first_layer}"\n'
+        f'- DEEPER underwater (mid layer): "{r.second_layer}"\n'
+        f'- At the very BOTTOM, the darkest depths (the abyss): "{r.abyss}"\n'
+        "Text descends with depth; keep each layer clearly separated."
+    )
+
+
+def _build_two_buttons_prompt(r: TwoButtonsResult) -> str:
+    """Prompt: a label on each button, impossibility as a bottom caption."""
+    return _PROMPT_PREAMBLE + (
+        "This is the 'two buttons' / sweating-decision meme. The top panel "
+        "shows two red buttons.\n"
+        f'- Write on/above the LEFT button: "{r.button_a_label}"\n'
+        f'- Write on/above the RIGHT button: "{r.button_b_label}"\n'
+        "- Add a bold white meme caption with a black outline across the "
+        f'BOTTOM of the whole image: "{r.impossibility}"\n'
+        "Keep the sweating man and the buttons exactly as drawn."
+    )
+
+
+def _build_arc_prompt(r: ArcResult) -> str:
+    """Prompt: four ascending captions on the expanding-brain panels."""
+    return _PROMPT_PREAMBLE + (
+        "This is the expanding-brain meme: four rows, each with a blank "
+        "caption area on the LEFT and a brain image on the RIGHT, escalating "
+        "from a plain brain (top) to a glowing cosmic brain (bottom).\n"
+        f'- Top row caption (the "before" state): "{r.before}"\n'
+        f'- Second row caption (the catalyst): "{r.catalyst}"\n'
+        f'- Third row caption (the middle): "{r.middle}"\n'
+        f'- Bottom row caption (the "after" state): "{r.after}"\n'
+        "Place black text in each left caption box; bottom-to-top escalates."
+    )
+
+
+def _build_compass_prompt(r: CompassResult) -> str:
+    """Prompt: axis-pole labels, a marker at the position, a caption."""
+    a1_neg, a1_pos = r.axis_1_poles
+    a2_neg, a2_pos = r.axis_2_poles
+    return _PROMPT_PREAMBLE + (
+        "This is a 2x2 political-compass-style quadrant grid with a "
+        "horizontal and a vertical axis.\n"
+        f'- Label the LEFT end of the horizontal axis: "{a1_neg}"\n'
+        f'- Label the RIGHT end of the horizontal axis: "{a1_pos}"\n'
+        f'- Label the BOTTOM end of the vertical axis: "{a2_neg}"\n'
+        f'- Label the TOP end of the vertical axis: "{a2_pos}"\n'
+        "- Draw a single clearly marked dot/marker located at horizontal "
+        f"position {r.axis_1_position:+.2f} and vertical position "
+        f"{r.axis_2_position:+.2f} (both on a -1.0 to +1.0 scale, 0 is "
+        "centre).\n"
+        f'- Add a caption beneath the grid: "{r.why_these_axes}"'
+    )
+
+
+_PROMPT_BUILDERS = {
+    "IcebergResult": _build_iceberg_prompt,
+    "TwoButtonsResult": _build_two_buttons_prompt,
+    "ArcResult": _build_arc_prompt,
+    "CompassResult": _build_compass_prompt,
+}
+
+
+def build_prompt(typed_result: TypedResult) -> str:
+    """Return the gpt-image-2 fill prompt for ``typed_result``.
+
+    The prompt embeds the result's slot text verbatim and instructs the
+    model where to place it. Raises :class:`RenderError` for an unknown
+    result type.
+    """
+    name = type(typed_result).__name__
+    builder = _PROMPT_BUILDERS.get(name)
+    if builder is None:
+        raise RenderError(
+            f"cannot render result of type {name!r}; expected one of "
+            f"{sorted(_PROMPT_BUILDERS)}"
+        )
+    return builder(typed_result)  # type: ignore[arg-type]
+
+
+# ---------------------------------------------------------------------------
+# Template-image inputs
 # ---------------------------------------------------------------------------
 
 
-def _font(size: int) -> ImageFont.FreeTypeFont:
-    """Return a scalable default font at ``size`` px — no system path needed."""
-    return ImageFont.load_default(size=size)
+def _compass_base() -> Image.Image:
+    """Draw a clean 2x2 colored-quadrant compass base with axis arrows.
+
+    The compass has no photographic reference image, so its template is
+    generated with Pillow at call time — a colored 2x2 grid with axis
+    arrows, which gpt-image-2 then labels and marks.
+    """
+    img = Image.new("RGB", (WIDTH, HEIGHT), (255, 255, 255))
+    draw = ImageDraw.Draw(img)
+
+    margin = 120
+    grid_top = margin
+    grid_size = WIDTH - 2 * margin
+    grid_bottom = grid_top + grid_size
+    left, right = margin, WIDTH - margin
+    cx = (left + right) // 2
+    cy = (grid_top + grid_bottom) // 2
+
+    quadrants = [
+        ((left, grid_top, cx, cy), (210, 226, 245)),       # top-left
+        ((cx, grid_top, right, cy), (214, 240, 220)),      # top-right
+        ((left, cy, cx, grid_bottom), (245, 224, 214)),    # bottom-left
+        ((cx, cy, right, grid_bottom), (242, 238, 208)),   # bottom-right
+    ]
+    for box, color in quadrants:
+        draw.rectangle(box, fill=color)
+    draw.rectangle((left, grid_top, right, grid_bottom), outline=(30, 30, 32), width=4)
+
+    # Axis arrows through the centre.
+    draw.line((left - 30, cy, right + 30, cy), fill=(30, 30, 32), width=5)
+    draw.line((cx, grid_top - 30, cx, grid_bottom + 30), fill=(30, 30, 32), width=5)
+    a = 18
+    draw.polygon(
+        [(right + 30, cy), (right + 30 - a, cy - a), (right + 30 - a, cy + a)],
+        fill=(30, 30, 32),
+    )
+    draw.polygon(
+        [(cx, grid_top - 30), (cx - a, grid_top - 30 + a), (cx + a, grid_top - 30 + a)],
+        fill=(30, 30, 32),
+    )
+    return img
 
 
-# Punctuation the LLM commonly produces that the bitmap-derived default font
-# has no glyph for — rendering them as tofu boxes. Mapped to ASCII-safe
-# equivalents so the portrait is always legible without bundling a font.
+def _template_image(typed_result: TypedResult) -> tuple[Image.Image, str]:
+    """Return the template image for ``typed_result`` and a JPEG/PNG label.
+
+    For iceberg / two_buttons / arc this is the real reference jpg; for the
+    compass it is the Pillow-drawn quadrant base. Raises :class:`RenderError`
+    for an unknown result type.
+    """
+    name = type(typed_result).__name__
+    if name == "CompassResult":
+        return _compass_base(), "compass.png"
+    filename = _REFERENCE_FILES.get(name)
+    if filename is None:
+        raise RenderError(
+            f"cannot render result of type {name!r}; expected one of "
+            f"{sorted(_PROMPT_BUILDERS)}"
+        )
+    path = REFERENCE_DIR / filename
+    if not path.exists():
+        raise RenderError(f"reference template image is missing: {path}")
+    return Image.open(path).convert("RGB"), filename
+
+
+# ---------------------------------------------------------------------------
+# gpt-image-2 render path
+# ---------------------------------------------------------------------------
+
+
+def resolve_render_model() -> str:
+    """Return the render model — ``RENDER_MODEL`` env, else the default."""
+    return os.environ.get("RENDER_MODEL") or DEFAULT_RENDER_MODEL
+
+
+def get_openai_client(api_key: Optional[str] = None):
+    """Build an ``openai`` SDK client for the images API.
+
+    The key comes from ``api_key`` or the ``OPENAI_API_KEY`` environment
+    variable. Returns ``None`` when no key is available — the signal for
+    :func:`render` to use the Pillow fallback. The SDK is imported lazily so
+    importing this module never requires it and never touches the network.
+    """
+    key = api_key or os.environ.get(API_KEY_ENV)
+    if not key:
+        return None
+    from openai import OpenAI
+
+    return OpenAI(api_key=key)
+
+
+def _render_via_openai(
+    typed_result: TypedResult,
+    *,
+    api_key: Optional[str] = None,
+    client: Optional[object] = None,
+) -> Optional[Image.Image]:
+    """Render ``typed_result`` with gpt-image-2; return the image or ``None``.
+
+    Sends the template image + the per-template fill prompt to the OpenAI
+    ``images/edits`` endpoint (``model=gpt-image-2``, ``quality=high``,
+    ``size=1024x1536``). gpt-image-2 does not accept ``input_fidelity`` —
+    that parameter is deliberately not sent.
+
+    Returns the filled PIL image on success. Returns ``None`` (with a logged
+    warning) when no API key is available or the call fails — the caller
+    then uses the Pillow fallback. Never raises on an API failure.
+    """
+    active_client = client if client is not None else get_openai_client(api_key)
+    if active_client is None:
+        logger.warning(
+            "%s is not set — gpt-image-2 render disabled, using the Pillow "
+            "fallback render.",
+            API_KEY_ENV,
+        )
+        return None
+
+    prompt = build_prompt(typed_result)
+    template_img, filename = _template_image(typed_result)
+
+    buffer = io.BytesIO()
+    template_img.save(buffer, "PNG")
+    buffer.seek(0)
+    buffer.name = filename
+
+    try:
+        response = active_client.images.edit(  # type: ignore[attr-defined]
+            model=resolve_render_model(),
+            image=buffer,
+            prompt=prompt,
+            quality="high",
+            size=RENDER_SIZE,
+        )
+    except Exception as exc:  # network / API / SDK failure
+        logger.warning(
+            "gpt-image-2 render call failed (%s) — using the Pillow "
+            "fallback render.",
+            exc,
+        )
+        return None
+
+    try:
+        b64 = response.data[0].b64_json  # type: ignore[attr-defined]
+        raw = base64.b64decode(b64)
+        return Image.open(io.BytesIO(raw)).convert("RGB")
+    except Exception as exc:
+        logger.warning(
+            "gpt-image-2 response had no usable image (%s) — using the "
+            "Pillow fallback render.",
+            exc,
+        )
+        return None
+
+
+# ---------------------------------------------------------------------------
+# Minimal Pillow fallback render
+# ---------------------------------------------------------------------------
+#
+# Used only when the gpt-image-2 path is unavailable. It is intentionally
+# simple — a legible text card on the template image — not a full meme. Its
+# job is to never crash the offline pipeline, not to look great.
+
 _GLYPH_FALLBACKS = {
-    "—": " - ",   # em dash
-    "–": "-",     # en dash
-    "‘": "'",     # left single quote
-    "’": "'",     # right single quote / apostrophe
-    "“": '"',     # left double quote
-    "”": '"',     # right double quote
-    "…": "...",   # ellipsis
-    " ": " ",     # non-breaking space
+    "—": " - ", "–": "-", "‘": "'", "’": "'",
+    "“": '"', "”": '"', "…": "...", " ": " ",
 }
 
 
 def _sanitize(text: str) -> str:
-    """Replace non-ASCII punctuation the default font cannot render.
-
-    The default Pillow font lacks glyphs for em dashes, curly quotes, and
-    ellipses, which the interviewer/slot-filling LLMs produce freely. Left
-    unmapped these draw as missing-glyph boxes. Mapping to ASCII keeps every
-    portrait legible without sourcing, licensing, and bundling a TTF.
-    """
+    """Replace non-ASCII punctuation the default Pillow font cannot render."""
     for bad, good in _GLYPH_FALLBACKS.items():
         text = text.replace(bad, good)
     return text
 
 
-def _wrap(
-    draw: ImageDraw.ImageDraw,
-    text: str,
-    font: ImageFont.FreeTypeFont,
-    max_width: int,
-) -> list[str]:
-    """Greedy word-wrap ``text`` so each line fits within ``max_width`` px.
+def _slot_lines(typed_result: TypedResult) -> list[str]:
+    """Return the typed result's slot texts as labelled lines for the card."""
+    name = type(typed_result).__name__
+    if name == "IcebergResult":
+        r = typed_result  # type: ignore[assignment]
+        return [
+            f"SURFACE: {r.surface}",
+            f"FIRST LAYER: {r.first_layer}",
+            f"SECOND LAYER: {r.second_layer}",
+            f"ABYSS: {r.abyss}",
+        ]
+    if name == "TwoButtonsResult":
+        r = typed_result  # type: ignore[assignment]
+        return [
+            f"LEFT BUTTON: {r.button_a_label}",
+            f"RIGHT BUTTON: {r.button_b_label}",
+            f"{r.impossibility}",
+        ]
+    if name == "ArcResult":
+        r = typed_result  # type: ignore[assignment]
+        return [
+            f"BEFORE: {r.before}",
+            f"CATALYST: {r.catalyst}",
+            f"MIDDLE: {r.middle}",
+            f"AFTER: {r.after}",
+        ]
+    if name == "CompassResult":
+        r = typed_result  # type: ignore[assignment]
+        return [
+            f"AXIS 1: {r.axis_1_poles[0]} <-> {r.axis_1_poles[1]}  ({r.axis_1_position:+.2f})",
+            f"AXIS 2: {r.axis_2_poles[0]} <-> {r.axis_2_poles[1]}  ({r.axis_2_position:+.2f})",
+            f"{r.why_these_axes}",
+        ]
+    raise RenderError(f"cannot render result of type {name!r}")
 
-    A single word longer than ``max_width`` is hard-broken character-by-
-    character so it can never overflow the region.
-    """
+
+def _wrap(draw, text, font, max_width) -> list[str]:
+    """Greedy word-wrap ``text`` so each line fits within ``max_width`` px."""
     words = _sanitize(text or "").split()
     if not words:
         return [""]
@@ -112,18 +403,7 @@ def _wrap(
     for word in words:
         candidate = f"{current} {word}".strip()
         if draw.textlength(candidate, font=font) <= max_width or not current:
-            if draw.textlength(word, font=font) > max_width and not current:
-                # A lone over-long word: hard-break it.
-                piece = ""
-                for ch in word:
-                    if draw.textlength(piece + ch, font=font) <= max_width or not piece:
-                        piece += ch
-                    else:
-                        lines.append(piece)
-                        piece = ch
-                current = piece
-            else:
-                current = candidate
+            current = candidate
         else:
             lines.append(current)
             current = word
@@ -132,285 +412,43 @@ def _wrap(
     return lines
 
 
-def _fit_text(
-    draw: ImageDraw.ImageDraw,
-    text: str,
-    box: tuple[int, int],
-    *,
-    max_size: int,
-    min_size: int = 14,
-    line_spacing: float = 1.15,
-) -> tuple[list[str], ImageFont.FreeTypeFont, int]:
-    """Find the largest font size at which ``text`` wraps to fit ``box``.
+def _render_fallback(typed_result: TypedResult) -> Image.Image:
+    """Composite the result's slot text onto its template image with Pillow.
 
-    ``box`` is ``(max_width, max_height)`` in px. Returns the wrapped lines,
-    the chosen font, and the per-line pixel height. Never raises on long
-    text: it shrinks to ``min_size`` and accepts a slight overflow rather
-    than failing.
+    The minimal degraded render: the template image with a translucent card
+    of legible slot text. Never raises except for an unknown result type.
     """
-    max_width, max_height = box
-    size = max_size
-    while size >= min_size:
-        font = _font(size)
-        lines = _wrap(draw, text, font, max_width)
-        line_h = int(size * line_spacing)
-        if line_h * len(lines) <= max_height:
-            return lines, font, line_h
-        size -= 2
-    font = _font(min_size)
-    lines = _wrap(draw, text, font, max_width)
-    return lines, font, int(min_size * line_spacing)
+    name = type(typed_result).__name__
+    if name == "CompassResult":
+        img = _compass_base()
+    else:
+        img, _ = _template_image(typed_result)
+        img = img.resize((WIDTH, HEIGHT))
 
+    draw = ImageDraw.Draw(img, "RGBA")
+    font = ImageFont.load_default(size=30)
+    pad = 50
+    max_w = WIDTH - 2 * pad
 
-def _draw_block(
-    draw: ImageDraw.ImageDraw,
-    lines: list[str],
-    font: ImageFont.FreeTypeFont,
-    line_h: int,
-    origin: tuple[int, int],
-    fill,
-    *,
-    centre_width: Optional[int] = None,
-    shadow: Optional[tuple] = None,
-) -> int:
-    """Draw wrapped ``lines`` from ``origin``; return the y after the block.
+    wrapped: list[str] = []
+    for line in _slot_lines(typed_result):
+        wrapped.extend(_wrap(draw, line, font, max_w))
+        wrapped.append("")
+    if wrapped and wrapped[-1] == "":
+        wrapped.pop()
 
-    If ``centre_width`` is given, each line is centred within that width
-    starting at ``origin[0]``. If ``shadow`` is given, a 2px offset shadow
-    is drawn in that colour first (used for white-on-image iceberg text).
-    """
-    x0, y = origin
-    for line in lines:
-        x = x0
-        if centre_width is not None:
-            w = draw.textlength(line, font=font)
-            x = x0 + (centre_width - w) / 2
-        if shadow is not None:
-            draw.text((x + 2, y + 2), line, font=font, fill=shadow)
-        draw.text((x, y), line, font=font, fill=fill)
+    line_h = 40
+    card_h = line_h * len(wrapped) + 2 * pad
+    card_top = (HEIGHT - card_h) // 2
+    draw.rectangle(
+        (pad // 2, card_top, WIDTH - pad // 2, card_top + card_h),
+        fill=(0, 0, 0, 200),
+    )
+    y = card_top + pad
+    for line in wrapped:
+        draw.text((pad, y), line, font=font, fill=(255, 255, 255))
         y += line_h
-    return y
-
-
-# ---------------------------------------------------------------------------
-# Base-image loading
-# ---------------------------------------------------------------------------
-
-
-def _load_base(result: TypedResult) -> Image.Image:
-    """Load and return a fresh RGB copy of the base image for ``result``."""
-    name = type(result).__name__
-    filename = _BASE_FILES.get(name)
-    if filename is None:
-        raise RenderError(
-            f"no base image mapping for result type {name!r}; "
-            f"expected one of {sorted(_BASE_FILES)}"
-        )
-    path = TEMPLATES_DIR / filename
-    if not path.exists():
-        raise RenderError(
-            f"base image {path} is missing — run "
-            f"assets/templates/_generate_bases.py to generate it"
-        )
-    return Image.open(path).convert("RGB")
-
-
-# ---------------------------------------------------------------------------
-# Per-template layouts
-# ---------------------------------------------------------------------------
-
-_WHITE = (255, 255, 255)
-_SHADOW = (0, 0, 0)
-_INK = (24, 24, 26)
-
-
-def _render_iceberg(result: IcebergResult) -> Image.Image:
-    """Four slot texts at four descending depths; white text with shadow."""
-    img = _load_base(result)
-    draw = ImageDraw.Draw(img)
-
-    waterline = int(HEIGHT * 0.18)
-    band_h = (HEIGHT - waterline) // 4
-    side_pad = 90
-    box_w = WIDTH - 2 * side_pad
-
-    layers = [
-        result.surface,
-        result.first_layer,
-        result.second_layer,
-        result.abyss,
-    ]
-    # Surface text largest, shrinking with depth.
-    max_sizes = [46, 42, 38, 34]
-    for i, (text, max_size) in enumerate(zip(layers, max_sizes)):
-        band_top = waterline + i * band_h
-        lines, font, line_h = _fit_text(
-            draw, text, (box_w, band_h - 40), max_size=max_size
-        )
-        block_h = line_h * len(lines)
-        y = band_top + (band_h - block_h) // 2
-        _draw_block(
-            draw, lines, font, line_h, (side_pad, y), _WHITE,
-            centre_width=box_w, shadow=_SHADOW,
-        )
     return img
-
-
-def _render_two_buttons(result: TwoButtonsResult) -> Image.Image:
-    """Labels on the buttons, seductions beside them, impossibility as caption."""
-    img = _load_base(result)
-    draw = ImageDraw.Draw(img)
-
-    btn_w, btn_h = 420, 150
-    gap = 60
-    btn_y = int(HEIGHT * 0.12)
-    left_x = (WIDTH - 2 * btn_w - gap) // 2
-
-    labels = [result.button_a_label, result.button_b_label]
-    seductions = [result.button_a_seduction, result.button_b_seduction]
-    for i, (label, seduction) in enumerate(zip(labels, seductions)):
-        x0 = left_x + i * (btn_w + gap)
-        # Label centred on the button face.
-        lines, font, line_h = _fit_text(
-            draw, label, (btn_w - 40, btn_h - 24), max_size=34
-        )
-        block_h = line_h * len(lines)
-        y = btn_y + (btn_h - block_h) // 2
-        _draw_block(
-            draw, lines, font, line_h, (x0 + 20, y), _WHITE,
-            centre_width=btn_w - 40, shadow=_SHADOW,
-        )
-        # Seduction beneath the button, within that button's column.
-        s_lines, s_font, s_lh = _fit_text(
-            draw, seduction, (btn_w, 150), max_size=26
-        )
-        _draw_block(
-            draw, s_lines, s_font, s_lh, (x0, btn_y + btn_h + 24), _INK,
-            centre_width=btn_w,
-        )
-
-    # Impossibility caption on the dark bottom strip.
-    strip_top = int(HEIGHT * 0.46)
-    cap_pad = 70
-    lines, font, line_h = _fit_text(
-        draw,
-        result.impossibility,
-        (WIDTH - 2 * cap_pad, HEIGHT - strip_top - 100),
-        max_size=44,
-    )
-    block_h = line_h * len(lines)
-    y = strip_top + (HEIGHT - strip_top - block_h) // 2
-    _draw_block(
-        draw, lines, font, line_h, (cap_pad, y), _WHITE,
-        centre_width=WIDTH - 2 * cap_pad,
-    )
-    return img
-
-
-def _render_compass(result: CompassResult) -> Image.Image:
-    """Axis poles labelled, a dot plotted at the position, caption beneath."""
-    img = _load_base(result)
-    draw = ImageDraw.Draw(img)
-
-    margin = 110
-    plot_top = margin
-    plot_size = WIDTH - 2 * margin
-    plot_bottom = plot_top + plot_size
-    left, right = margin, WIDTH - margin
-    cx = (left + right) // 2
-    cy = (plot_top + plot_bottom) // 2
-
-    pole_font = _font(28)
-
-    def _pole(text: str, anchor: tuple[int, int], align: str) -> None:
-        lines = _wrap(draw, text, pole_font, 360)
-        line_h = int(28 * 1.15)
-        x0, y = anchor
-        for k, line in enumerate(lines):
-            w = draw.textlength(line, font=pole_font)
-            if align == "center":
-                x = x0 - w / 2
-            elif align == "right":
-                x = x0 - w
-            else:
-                x = x0
-            draw.text((x, y + k * line_h), line, font=pole_font, fill=_INK)
-
-    # axis_1 is horizontal (negative -> left, positive -> right);
-    # axis_2 is vertical (negative -> bottom, positive -> top).
-    a1_neg, a1_pos = result.axis_1_poles
-    a2_neg, a2_pos = result.axis_2_poles
-    _pole(a2_pos, (cx, plot_top - 44), "center")
-    _pole(a2_neg, (cx, plot_bottom + 12), "center")
-    _pole(a1_neg, (left - 16, cy - 14), "right")
-    _pole(a1_pos, (right + 16, cy - 14), "left")
-
-    # Plot the dot. position in -1..1; +1 axis_2 maps to plot_top.
-    px = left + (result.axis_1_position + 1.0) / 2.0 * plot_size
-    py = plot_bottom - (result.axis_2_position + 1.0) / 2.0 * plot_size
-    r = 22
-    draw.ellipse(
-        [px - r, py - r, px + r, py + r],
-        fill=(232, 88, 84),
-        outline=(20, 20, 22),
-        width=4,
-    )
-
-    # why_these_axes caption beneath the plot.
-    cap_pad = 80
-    lines, font, line_h = _fit_text(
-        draw,
-        result.why_these_axes,
-        (WIDTH - 2 * cap_pad, HEIGHT - plot_bottom - 80),
-        max_size=34,
-    )
-    _draw_block(
-        draw, lines, font, line_h, (cap_pad, plot_bottom + 60), _INK,
-        centre_width=WIDTH - 2 * cap_pad,
-    )
-    return img
-
-
-def _render_arc(result: ArcResult) -> Image.Image:
-    """Four panel captions, read left-to-right then top-to-bottom."""
-    img = _load_base(result)
-    draw = ImageDraw.Draw(img)
-
-    pad = 24
-    cols, rows = 2, 2
-    panel_w = (WIDTH - pad * (cols + 1)) // cols
-    panel_h = (HEIGHT - pad * (rows + 1)) // rows
-    cap_h = int(panel_h * 0.32)
-
-    panels = [result.before, result.catalyst, result.middle, result.after]
-    for r in range(rows):
-        for c in range(cols):
-            idx = r * cols + c
-            x0 = pad + c * (panel_w + pad)
-            y0 = pad + r * (panel_h + pad)
-            cap_top = y0 + panel_h - cap_h
-            inner_pad = 20
-            lines, font, line_h = _fit_text(
-                draw,
-                panels[idx],
-                (panel_w - 2 * inner_pad, cap_h - 2 * inner_pad),
-                max_size=28,
-            )
-            block_h = line_h * len(lines)
-            y = cap_top + (cap_h - block_h) // 2
-            _draw_block(
-                draw, lines, font, line_h, (x0 + inner_pad, y), _INK,
-                centre_width=panel_w - 2 * inner_pad,
-            )
-    return img
-
-
-_RENDERERS = {
-    "IcebergResult": _render_iceberg,
-    "TwoButtonsResult": _render_two_buttons,
-    "CompassResult": _render_compass,
-    "ArcResult": _render_arc,
-}
 
 
 # ---------------------------------------------------------------------------
@@ -421,28 +459,38 @@ _RENDERERS = {
 def render(
     typed_result: TypedResult,
     out_path: Optional[Union[str, Path]] = None,
+    *,
+    api_key: Optional[str] = None,
+    client: Optional[object] = None,
 ) -> Union[Image.Image, Path]:
-    """Composite ``typed_result``'s slot text onto its base meme image.
+    """Render ``typed_result`` into a meme portrait.
 
     ``typed_result`` is any of the four typed result models from
-    :mod:`agent.state`. The matching base image and template-specific
-    layout are selected automatically.
+    :mod:`agent.state`. The matching real meme template and a per-template
+    fill prompt are sent to OpenAI's ``gpt-image-2`` image model, which
+    fills the meme text into the template art.
 
     Returns a :class:`PIL.Image.Image` when ``out_path`` is ``None``;
     otherwise writes a PNG to ``out_path`` and returns that path.
 
-    Raises :class:`RenderError` for an unrecognised result type or a
-    missing base image.
+    Graceful degradation: if ``OPENAI_API_KEY`` is missing or the API call
+    fails, a minimal Pillow text render is produced instead and a warning is
+    logged — render never hard-crashes the offline pipeline.
+
+    ``client`` injects a pre-built (or mock) OpenAI-compatible client;
+    otherwise one is built from ``api_key`` / ``OPENAI_API_KEY``.
+
+    Raises :class:`RenderError` only for an unrecognised result type.
     """
-    name = type(typed_result).__name__
-    renderer = _RENDERERS.get(name)
-    if renderer is None:
+    if type(typed_result).__name__ not in _PROMPT_BUILDERS:
         raise RenderError(
-            f"cannot render result of type {name!r}; expected one of "
-            f"{sorted(_RENDERERS)}"
+            f"cannot render result of type {type(typed_result).__name__!r}; "
+            f"expected one of {sorted(_PROMPT_BUILDERS)}"
         )
 
-    img = renderer(typed_result)
+    img = _render_via_openai(typed_result, api_key=api_key, client=client)
+    if img is None:
+        img = _render_fallback(typed_result)
 
     if out_path is None:
         return img

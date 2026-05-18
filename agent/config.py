@@ -91,6 +91,11 @@ class Config:
     openrouter_api_key: str | None
     openrouter_base_url: str
 
+    # --- OpenAI (render stage) ----------------------------------------------
+    # Powers the offline render stage's gpt-image-2 calls (pipeline/render.py).
+    # Absent -> render degrades to a minimal Pillow text render, never blocks.
+    openai_api_key: str | None
+
     # --- Deepgram (direct STT) ----------------------------------------------
     # When present, STT talks straight to Deepgram's API via the direct
     # livekit-plugins-deepgram plugin, bypassing LiveKit Inference and its
@@ -125,6 +130,16 @@ class Config:
     def has_openrouter(self) -> bool:
         """True when an OpenRouter API key is available for LLM calls."""
         return self.openrouter_api_key is not None
+
+    @property
+    def has_openai(self) -> bool:
+        """True when an OpenAI API key is available for the render stage.
+
+        When True, ``pipeline.render`` fills meme templates with gpt-image-2.
+        When False, render falls back to a minimal Pillow text render —
+        graceful degradation, the offline pipeline never blocks.
+        """
+        return self.openai_api_key is not None
 
     @property
     def has_deepgram(self) -> bool:
@@ -175,6 +190,7 @@ def load_config() -> Config:
         openrouter_api_key=_clean(os.getenv("OPENROUTER_API_KEY")),
         openrouter_base_url=_clean(os.getenv("OPENROUTER_BASE_URL"))
         or OPENROUTER_BASE_URL,
+        openai_api_key=_clean(os.getenv("OPENAI_API_KEY")),
         deepgram_api_key=_clean(os.getenv("DEEPGRAM_API_KEY")),
         stt_model=_clean(os.getenv("STT_MODEL")) or DEFAULT_STT_MODEL,
         tts_model=_clean(os.getenv("TTS_MODEL")) or DEFAULT_TTS_MODEL,
