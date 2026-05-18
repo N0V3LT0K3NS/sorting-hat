@@ -28,12 +28,19 @@ from pipeline.deliver import (
 
 @pytest.fixture(autouse=True)
 def _sessions_dir(tmp_path, monkeypatch):
-    """Point SESSIONS_DIR at a tmp dir and clear email config for every test."""
+    """Point SESSIONS_DIR at a tmp dir and clear delivery/email config.
+
+    DELIVERY_SERVER_URL and DELIVERY_BASE_URL are both cleared so the QR
+    payload tests are isolated from any ambient .env value — otherwise a
+    real DELIVERY_SERVER_URL in the environment overrides the per-test
+    expectation and these tests fail only under the full suite.
+    """
     sessions = tmp_path / "sessions"
     monkeypatch.setenv("SESSIONS_DIR", str(sessions))
     monkeypatch.delenv("SENDGRID_API_KEY", raising=False)
     monkeypatch.delenv("DELIVERY_FROM_EMAIL", raising=False)
     monkeypatch.delenv("DELIVERY_BASE_URL", raising=False)
+    monkeypatch.delenv("DELIVERY_SERVER_URL", raising=False)
     return sessions
 
 
