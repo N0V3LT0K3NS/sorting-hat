@@ -242,6 +242,37 @@ class InterviewState(BaseModel):
         description="Ordered record of interview turns.",
     )
 
+    def record_turn(self, speaker: str, text: str) -> None:
+        """Append one interview turn to :attr:`transcript_log`.
+
+        ``speaker`` is a free-form label (``"interviewer"`` /
+        ``"interviewee"`` in practice); ``text`` is the spoken/transcribed
+        content. An empty or whitespace-only ``text`` is a no-op so a stray
+        empty transcript event never pads the log.
+
+        Each turn is stored as a plain ``{"speaker", "text"}`` dict — JSON-
+        serialisable with no custom encoder, so the incremental transcript
+        writer and the offline pipeline both read it directly.
+        """
+        if not text or not text.strip():
+            return
+        self.transcript_log.append({"speaker": str(speaker), "text": str(text)})
+
+    def transcript_turns(self) -> list[tuple[str, str]]:
+        """Return the transcript as ``(speaker, text)`` pairs for the pipeline.
+
+        :func:`pipeline.classify.wrap_transcript_xml` consumes exactly this
+        shape. Entries already in pair form are passed through; dict entries
+        (the shape :meth:`record_turn` writes) are converted.
+        """
+        turns: list[tuple[str, str]] = []
+        for entry in self.transcript_log:
+            if isinstance(entry, dict):
+                turns.append((str(entry.get("speaker", "")), str(entry.get("text", ""))))
+            elif isinstance(entry, (list, tuple)) and len(entry) == 2:
+                turns.append((str(entry[0]), str(entry[1])))
+        return turns
+
     def signal_weights(self) -> dict[str, float]:
         """Return the four signal weights keyed by short template label."""
         return {
