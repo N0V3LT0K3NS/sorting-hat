@@ -25,6 +25,7 @@ _CONFIG_ENV_VARS = (
     "LIVEKIT_API_SECRET",
     "OPENROUTER_API_KEY",
     "OPENROUTER_BASE_URL",
+    "DEEPGRAM_API_KEY",
     "STT_MODEL",
     "TTS_MODEL",
     "INTERVIEWER_MODEL",
@@ -181,6 +182,78 @@ def test_build_llm_targets_openrouter(clean_env: None) -> None:
     assert "openrouter.ai" in str(llm._client.base_url)
 
 
+def test_interviewer_llm_has_max_tokens_cap(clean_env: None) -> None:
+    """The interviewer LLM is built with the max_tokens cap applied.
+
+    An unbounded reply in a real-time voice loop can starve the TTS pipeline,
+    so build_llm() caps the reply length at INTERVIEWER_MAX_TOKENS.
+    """
+    from agent.config import INTERVIEWER_MAX_TOKENS, load_config
+    from agent.main import build_llm
+
+    llm = build_llm(load_config())
+
+    assert llm._opts.max_completion_tokens == INTERVIEWER_MAX_TOKENS
+    # A short cap — spoken follow-ups, never monologues.
+    assert 0 < INTERVIEWER_MAX_TOKENS <= 500
+
+
+# ---------------------------------------------------------------------------
+# STT — provider route selection (direct Deepgram vs LiveKit Inference)
+# ---------------------------------------------------------------------------
+
+
+def test_config_has_deepgram_reflects_key(
+    clean_env: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """has_deepgram is True only when a non-blank DEEPGRAM_API_KEY is set."""
+    from agent.config import load_config
+
+    # Absent -> False.
+    assert load_config().has_deepgram is False
+
+    # Blank / whitespace -> still treated as absent.
+    monkeypatch.setenv("DEEPGRAM_API_KEY", "   ")
+    cfg = load_config()
+    assert cfg.deepgram_api_key is None
+    assert cfg.has_deepgram is False
+
+    # Real value -> True.
+    monkeypatch.setenv("DEEPGRAM_API_KEY", "dg-key")
+    cfg = load_config()
+    assert cfg.deepgram_api_key == "dg-key"
+    assert cfg.has_deepgram is True
+
+
+def test_build_stt_uses_inference_without_deepgram_key(clean_env: None) -> None:
+    """With no DEEPGRAM_API_KEY, STT falls back to the LiveKit Inference path."""
+    from agent.config import load_config
+    from agent.main import build_stt
+
+    stt = build_stt(load_config())
+
+    # inference.STT — the bundled LiveKit Inference gateway.
+    assert stt.__class__.__module__.startswith("livekit.agents.inference")
+    assert stt.__class__.__name__ == "STT"
+
+
+def test_build_stt_uses_direct_deepgram_when_key_present(
+    clean_env: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With a DEEPGRAM_API_KEY, STT uses the direct livekit-plugins-deepgram plugin."""
+    from agent.config import DIRECT_STT_MODEL, load_config
+    from agent.main import build_stt
+
+    monkeypatch.setenv("DEEPGRAM_API_KEY", "dg-key")
+    stt = build_stt(load_config())
+
+    # The direct Deepgram plugin's Flux v2 STT — bypasses LiveKit Inference.
+    assert stt.__class__.__module__.startswith("livekit.plugins.deepgram")
+    assert stt.__class__.__name__ == "STTv2"
+    # The bare Flux model name (no "deepgram/" Inference prefix).
+    assert DIRECT_STT_MODEL == "flux-general-en"
+
+
 def test_dry_run_exits_zero(clean_env: None) -> None:
     """run_dry_run() validates wiring and returns exit code 0 with no keys."""
     from agent.main import run_dry_run
@@ -200,6 +273,35 @@ def test_dry_run_exits_zero_with_keys_present(
     monkeypatch.setenv("OPENROUTER_API_KEY", "or-key")
 
     assert run_dry_run() == 0
+
+
+def test_dry_run_logs_inference_stt_path_without_key(
+    clean_env: None, caplog: pytest.LogCaptureFixture
+) -> None:
+    """With no DEEPGRAM_API_KEY, the dry-run log reports the Inference STT path."""
+    from agent.main import run_dry_run
+
+    with caplog.at_level("INFO", logger="sorting-hat.agent"):
+        assert run_dry_run() == 0
+
+    assert any(
+        "STT path: LiveKit Inference" in rec.message for rec in caplog.records
+    )
+
+
+def test_dry_run_logs_direct_deepgram_stt_path_with_key(
+    clean_env: None, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """With a DEEPGRAM_API_KEY, the dry-run log reports the direct Deepgram path."""
+    from agent.main import run_dry_run
+
+    monkeypatch.setenv("DEEPGRAM_API_KEY", "dg-key")
+    with caplog.at_level("INFO", logger="sorting-hat.agent"):
+        assert run_dry_run() == 0
+
+    assert any(
+        "STT path: DIRECT Deepgram" in rec.message for rec in caplog.records
+    )
 
 
 def test_main_dry_run_flag_returns_zero(clean_env: None) -> None:
