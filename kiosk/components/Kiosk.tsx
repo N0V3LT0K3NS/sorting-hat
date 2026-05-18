@@ -191,7 +191,10 @@ export function Kiosk() {
           {/* Enhanced (Krisp) noise cancellation for the rough public-space
               audio. Mounted inside the room so it can reach the mic track. */}
           <NoiseCancellation />
-          <ActiveScreen onComplete={handleComplete} />
+          <ActiveScreen
+            sessionId={connection.roomName}
+            onComplete={handleComplete}
+          />
         </LiveKitRoom>
       )}
 

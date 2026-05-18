@@ -20,8 +20,30 @@ import { SessionProgress } from "./SessionProgress";
  * Calls `onComplete` when the room disconnects (the agent ends the session)
  * or when the agent worker never joins within a grace period — a kiosk must
  * never strand a visitor on a frozen "Connecting…" screen.
+ *
+ * The End button is **state-aware**: it polls the delivery server's
+ * `GET /live/<session-id>` for the interview's phase and only appears once
+ * there is enough material to make a portrait from. Before the base questions
+ * are done it is hidden entirely; during the probe it is a soft "End early"
+ * affordance; once routing has settled it is the confident "I'm done" button.
+ * Whichever way End is pressed, the agent side runs the offline pipeline on
+ * whatever transcript exists — ending early yields a thinner portrait, never
+ * none.
  */
-export function ActiveScreen({ onComplete }: { onComplete: () => void }) {
+
+/** The interview phases the delivery server's `/live` endpoint reports. */
+type LivePhase = "pending" | "base_questions" | "probing" | "complete";
+
+/** How often to poll the live-state endpoint while the interview runs. */
+const LIVE_POLL_INTERVAL_MS = 3_000;
+
+export function ActiveScreen({
+  sessionId,
+  onComplete,
+}: {
+  sessionId: string | null;
+  onComplete: () => void;
+}) {
   const { state, audioTrack, agentTranscriptions } = useVoiceAssistant();
   const connectionState = useConnectionState();
   const [showTranscript, setShowTranscript] = useState(false);
@@ -33,6 +55,47 @@ export function ActiveScreen({ onComplete }: { onComplete: () => void }) {
   // initial Disconnected value of useConnectionState() being mistaken for the
   // interview ending the instant this screen mounts.
   const hasConnected = useRef(false);
+  // The interview's phase, polled from the delivery server's /live endpoint —
+  // it gates the End button. Starts "pending": no End button until there is
+  // enough material to make a portrait from.
+  const [livePhase, setLivePhase] = useState<LivePhase>("pending");
+
+  // Poll GET /live/<session-id> for the interview phase (same pattern as
+  // CompleteScreen's status poll). A failed poll is non-fatal — keep the last
+  // known phase and try again; a missing session id just never polls.
+  useEffect(() => {
+    if (!sessionId) return;
+
+    const baseUrl = (
+      process.env.NEXT_PUBLIC_DELIVERY_SERVER_URL ?? "http://localhost:8808"
+    ).replace(/\/+$/, "");
+
+    let stopped = false;
+    let timer: ReturnType<typeof setTimeout>;
+
+    const poll = async () => {
+      if (stopped) return;
+      try {
+        const res = await fetch(`${baseUrl}/live/${sessionId}`, {
+          cache: "no-store",
+        });
+        if (res.ok) {
+          const data = (await res.json()) as { phase?: string };
+          if (!stopped && isLivePhase(data.phase)) setLivePhase(data.phase);
+        }
+      } catch {
+        // A single failed poll is not fatal — the delivery server may be
+        // starting, or the wifi hiccuped. Keep the last phase and retry.
+      }
+      if (!stopped) timer = setTimeout(poll, LIVE_POLL_INTERVAL_MS);
+    };
+
+    void poll();
+    return () => {
+      stopped = true;
+      clearTimeout(timer);
+    };
+  }, [sessionId]);
 
   // When the room disconnects, the interview is over -> Complete screen.
   // The initial Disconnected state (and Connecting) is inert: only a
@@ -95,16 +158,32 @@ export function ActiveScreen({ onComplete }: { onComplete: () => void }) {
       {/* A calm, building sense of how far the conversation has come. */}
       <SessionProgress />
 
-      {/* A deliberate, low-prominence way to leave the interview. Routes
-          through the same onComplete path the agent/disconnect uses, so the
-          LiveKitRoom teardown (mic release, peer connection) happens once. */}
-      <button
-        className={styles.endButton}
-        onClick={onComplete}
-        aria-label="End the interview"
-      >
-        End
-      </button>
+      {/* The state-aware End button. Hidden until the base questions are
+          done — before then the interview genuinely lacks the material for a
+          portrait. During the probe it is a soft "End early" affordance:
+          allowed (a kiosk must never trap anyone) but quiet. Once routing has
+          settled it becomes the confident primary "I'm done" button. Either
+          way it routes through the same onComplete path the agent/disconnect
+          uses, so the LiveKitRoom teardown happens exactly once — and the
+          agent side runs the offline pipeline on whatever transcript exists. */}
+      {livePhase === "probing" && (
+        <button
+          className={styles.endButtonSoft}
+          onClick={onComplete}
+          aria-label="End the interview early"
+        >
+          End early
+        </button>
+      )}
+      {livePhase === "complete" && (
+        <button
+          className={styles.endButtonPrimary}
+          onClick={onComplete}
+          aria-label="Finish the interview"
+        >
+          I&rsquo;m done
+        </button>
+      )}
 
       {/* Hidden hotspot in the corner — for dev/debug only, off by default. */}
       <button
@@ -143,6 +222,16 @@ export function ActiveScreen({ onComplete }: { onComplete: () => void }) {
  * few seconds — but bounded, so a misconfigured deployment fails visibly.
  */
 const AGENT_JOIN_TIMEOUT_MS = 30_000;
+
+/** Narrow an unknown `/live` phase value to a known `LivePhase`. */
+function isLivePhase(value: unknown): value is LivePhase {
+  return (
+    value === "pending" ||
+    value === "base_questions" ||
+    value === "probing" ||
+    value === "complete"
+  );
+}
 
 /** A calm, human-readable label for the current voice-assistant state. */
 function stateLabel(
