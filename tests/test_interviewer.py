@@ -23,6 +23,7 @@ import pytest
 from agent.interviewer import (
     BASE_QUESTION_COUNT,
     BASE_QUESTIONS,
+    INTERVIEWEE_TURNS_PER_BASE_QUESTION,
     InterviewerAgent,
     load_persona,
 )
@@ -320,3 +321,31 @@ def test_advance_saturates_and_does_not_overcount(
 
     assert agent.base_questions_completed == BASE_QUESTION_COUNT
     assert any("already complete" in rec.message for rec in caplog.records)
+
+
+def test_advance_from_interviewee_turn_count_is_monotonic_and_saturates() -> None:
+    """The live supervisor can drive base progress from observed turn count."""
+    agent = InterviewerAgent()
+
+    assert agent.advance_base_questions_from_interviewee_turns(1) == 0
+    assert agent.base_questions_completed == 0
+
+    assert (
+        agent.advance_base_questions_from_interviewee_turns(
+            INTERVIEWEE_TURNS_PER_BASE_QUESTION
+        )
+        == 1
+    )
+    assert agent.base_questions_completed == 1
+
+    later_turn_count = INTERVIEWEE_TURNS_PER_BASE_QUESTION * 3
+    assert agent.advance_base_questions_from_interviewee_turns(later_turn_count) == 2
+    assert agent.base_questions_completed == 3
+
+    assert agent.advance_base_questions_from_interviewee_turns(1) == 0
+    assert agent.base_questions_completed == 3
+
+    large_turn_count = INTERVIEWEE_TURNS_PER_BASE_QUESTION * (BASE_QUESTION_COUNT + 10)
+    assert agent.advance_base_questions_from_interviewee_turns(large_turn_count) == 2
+    assert agent.base_questions_completed == BASE_QUESTION_COUNT
+    assert agent.base_questions_done is True

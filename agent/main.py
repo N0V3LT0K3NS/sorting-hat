@@ -35,6 +35,7 @@ Run modes
 from __future__ import annotations
 
 import argparse
+import asyncio
 import logging
 import sys
 import time
@@ -304,10 +305,14 @@ def wire_session_finalize(
 
     1. **Records the turn** onto :class:`InterviewState` (fix 2: confirm turns
        are captured — an empty transcript is worthless).
-    2. **Persists the transcript incrementally** to ``sessions/<id>/`` after
+    2. **Drives supervisor progress** from observable conversation state:
+       completed interviewee-turn count advances base-question progress, and
+       once the base interview is complete, probe routing is scheduled exactly
+       once.
+    3. **Persists the transcript incrementally** to ``sessions/<id>/`` after
        every turn (fix 2b), so a browser refresh or crash mid-interview never
        loses what was said.
-    3. **Closes the session and runs the offline pipeline** once the
+    4. **Closes the session and runs the offline pipeline** once the
        supervisor's routing has settled — :attr:`InterviewerAgent.routing_done`
        is True (a probe landed, the closing was spoken). ``finalize_session``
        calls ``session.aclose()`` (the mic stops), writes the finalised
@@ -318,6 +323,56 @@ def wire_session_finalize(
     immediately. A guard flag makes the close-and-finalize fire exactly once.
     """
     finalize_started = {"done": False}
+    route_started = {"done": False}
+
+    def _interviewee_turn_count() -> int:
+        return sum(
+            1
+            for speaker, text in state.transcript_turns()
+            if speaker == INTERVIEWEE_ROLE and text.strip()
+        )
+
+    def _persist_current_state() -> None:
+        try:
+            persist_transcript(session_id, state)
+        except Exception as exc:  # never let persistence crash the session
+            logger.warning("incremental transcript persist failed: %s", exc)
+
+    def _maybe_finalize() -> None:
+        if agent.routing_done and not finalize_started["done"]:
+            finalize_started["done"] = True
+            logger.info(
+                "session %s: routing complete — closing session and "
+                "triggering the offline pipeline",
+                session_id,
+            )
+            asyncio.ensure_future(finalize_session(session, session_id, state))
+
+    def _on_route_done(task: asyncio.Task) -> None:
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is not None:
+            logger.warning(
+                "session %s: supervisor routing failed — interview remains open",
+                session_id,
+                exc_info=exc,
+            )
+            return
+        _persist_current_state()
+        _maybe_finalize()
+
+    def _drive_supervisor() -> None:
+        agent.advance_base_questions_from_interviewee_turns(_interviewee_turn_count())
+
+        if agent.base_questions_done and not agent.routing_done and not route_started["done"]:
+            route_started["done"] = True
+            logger.info(
+                "session %s: base interview complete — routing to probe",
+                session_id,
+            )
+            task = asyncio.ensure_future(agent.route_to_probe())
+            task.add_done_callback(_on_route_done)
 
     def _on_conversation_item(ev: object) -> None:
         # ev.item is a llm.ChatMessage — role "user"/"assistant", text in
@@ -330,23 +385,13 @@ def wire_session_finalize(
         speaker = INTERVIEWER_ROLE if role == "assistant" else INTERVIEWEE_ROLE
         agent.record_turn(speaker, text or "")
 
+        _drive_supervisor()
+
         # fix 2b — incremental persist after every turn.
-        try:
-            persist_transcript(session_id, state)
-        except Exception as exc:  # never let persistence crash the session
-            logger.warning("incremental transcript persist failed: %s", exc)
+        _persist_current_state()
 
         # fix 1 + 3 — once routing has settled, close + run the pipeline.
-        if agent.routing_done and not finalize_started["done"]:
-            finalize_started["done"] = True
-            logger.info(
-                "session %s: routing complete — closing session and "
-                "triggering the offline pipeline",
-                session_id,
-            )
-            asyncio.ensure_future(
-                finalize_session(session, session_id, state)
-            )
+        _maybe_finalize()
 
     session.on("conversation_item_added", _on_conversation_item)
 
