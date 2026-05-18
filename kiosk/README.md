@@ -37,26 +37,43 @@ Black background, a single warm amber accent, large readable type, and
 calm fade transitions with a slow breathing glow so the idle screen never
 feels dead.
 
-## Developer view (`/dev`)
+## Developer dashboard (`/dev`)
 
 A separate diagnostic route at `/dev`, away from the visitor kiosk flow at
-`/`. It shows, **live as an interview runs**, what the background classifier
-is capturing:
+`/`. It is a full **local session dashboard** over every interview this
+machine has run — a two-level view, both fed by the local delivery server
+(`NEXT_PUBLIC_DELIVERY_SERVER_URL`, the same server the Complete screen
+uses).
 
-- the four classifier **signal weights** (`iceberg`, `two_buttons`,
-  `compass`, `arc`) as horizontal bars that move as new turns are scored —
-  the leading signal's bar is shown in the accent color;
-- **base-question progress** — `N / total` with a progress bar;
-- the interview **phase**, the **leading** and **chosen** template,
-  `routing_done`, the **turn count**, and the `updated_at` timestamp.
+**Index (`/dev`)** — a live list of every interview, most-recent first. Each
+row shows the session id, a relative timestamp, a status badge (`active`
+while the interview runs, `rendering` mid-pipeline, `complete`, `error`, or
+`idle`), the turn count, the chosen template, and a portrait thumbnail once
+one exists. It polls `GET /sessions` every ~4 s, so a newly-started
+interview appears on its own. A calm empty state shows when there are no
+sessions yet.
 
-Point it at a running interview either by query param —
-`/dev?session=<session-id>` — or by typing/pasting the session id into the
-text input on the page. It polls the delivery server's
-`GET /live/<session-id>` every ~1.75 s (via `NEXT_PUBLIC_DELIVERY_SERVER_URL`,
-the same server the Complete screen uses). If no session is set, or the
-server is unreachable, or the session has no state yet, it shows a calm
-line and keeps polling. This route never affects the kiosk flow at `/`.
+**Detail (`/dev?session=<session-id>`)** — one session in full. The selected
+session lives in the `?session=` query param, so a detail view is linkable
+and survives a refresh; a back link returns to the index. What the detail
+view shows depends on where the session is:
+
+- **Active** (interview running) — the **live classifier view**: the four
+  signal weights (`iceberg`, `two_buttons`, `compass`, `arc`) as moving
+  bars with the leading signal in the accent color, base-question progress,
+  the phase, leading/chosen template, `routing_done`, and the turn count.
+  Polls `GET /live/<session-id>` every ~2 s.
+- **Mid-pipeline** (interview done, portrait generating) — the offline
+  pipeline **stage row**, polling `GET /status/<session-id>`; the result
+  panel below reveals itself once the pipeline is `done`.
+- **Complete** (or as far as it got) — the **full local record**: the
+  portrait image, the classification (template, confidence, reasoning), the
+  filled result, and the **full transcript** rendered turn by turn. A
+  developer or operator can review exactly what the machine captured.
+
+Every fetch degrades gracefully — a pending or unreachable delivery server,
+or a partial session (a transcript but no portrait), shows what exists and
+keeps a calm line. This route never affects the kiosk flow at `/`.
 
 ## Session lifecycle
 
