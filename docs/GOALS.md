@@ -216,6 +216,24 @@ Every dispatched goal's completion condition ends with:
 
 ---
 
+## Post-build work
+
+- **G16.1 — model selection applied to config:** interviewer moved from
+  Haiku to Sonnet 4.6; related model choices were applied across the runtime
+  config for the post-build live-test path.
+- **Live-test fix series:** PR #25 fixed kiosk premature completion; PR #26
+  switched STT to direct Deepgram; PR #28 added session-close handling,
+  transcript persistence, and the offline-pipeline trigger; PR #29 wired the
+  classifier-driven supervisor path; PR #34 fixed render glyph and overlap
+  regressions.
+- **Render rebuild:** `feat/genai-render` rebuilt the render stage on
+  `gpt-image-2` and landed in PR #35.
+- **Issue status:** #30 and #31 were render regressions fixed by PR #34; #32
+  was superseded by the `feat/genai-render` rebuild; #36 remains the
+  replay-harness fixture follow-up.
+
+---
+
 ## Dependency graph
 
 ```
