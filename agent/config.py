@@ -30,19 +30,29 @@ load_dotenv(override=False)
 # ---------------------------------------------------------------------------
 # Model selection
 # ---------------------------------------------------------------------------
+# Per-job model selection per the approved Decision 0001 (model-selection):
+# docs/decisions/0001-model-selection.md. Each job has an approved PRIMARY
+# (the default below) and a FALLBACK; both are overridable by env var so a
+# deployment — or a G17 live test — can swap models without a code change.
 # These are the LiveKit Inference model strings (confirmed against the
 # installed livekit-agents 1.5.9 inference.STTModels / inference.TTSModels
-# literals) and the OpenRouter model slug for the interviewer's brain.
+# literals) and OpenRouter model slugs.
 
-# Deepgram Flux — conversational STT with built-in turn detection.
+# --- Job 5 · STT — Deepgram Flux, conversational STT with turn detection. ---
 DEFAULT_STT_MODEL = "deepgram/flux-general-en"
 
-# Cartesia Sonic-3 — warm, low-latency conversational TTS.
-DEFAULT_TTS_MODEL = "cartesia/sonic-3"
+# --- Job 6 · TTS — Inworld TTS 1.5-max (primary), Cartesia Sonic-3 (fallback).
+# Inworld leads blind-preference for emotional realism; Sonic-3 is the
+# graceful-degradation fallback.
+DEFAULT_TTS_MODEL = "inworld/inworld-tts-1.5-max"
+FALLBACK_TTS_MODEL = "cartesia/sonic-3"
 
-# Interviewer LLM, routed through OpenRouter. Overridable via INTERVIEWER_MODEL
-# so a live smoke test can swap models without a code change.
-DEFAULT_LLM_MODEL = "openai/gpt-4o-mini"
+# --- Job 1 · Interviewer brain — Claude Haiku 4.5 (primary), Sonnet 4.6
+# (fallback). Haiku's ~0.6-0.85s TTFT fits the sub-800ms voice budget;
+# reasoning is left OFF (the in-call job is bounded, not frontier reasoning).
+# Provider routing sorts by latency — prefer the lowest-p50 endpoint.
+DEFAULT_LLM_MODEL = "anthropic/claude-haiku-4.5"
+FALLBACK_LLM_MODEL = "anthropic/claude-sonnet-4.6"
 
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 
@@ -73,9 +83,14 @@ class Config:
     openrouter_base_url: str
 
     # --- Model selection ----------------------------------------------------
+    # Each job carries its approved primary plus the fallback to swap to if
+    # the primary is unavailable (Decision 0001). No circuit breaker — the
+    # fallback is simply a configurable model string per that decision.
     stt_model: str
     tts_model: str
+    tts_fallback_model: str
     llm_model: str
+    llm_fallback_model: str
 
     # --- Runtime ------------------------------------------------------------
     sessions_dir: Path
@@ -137,7 +152,11 @@ def load_config() -> Config:
         or OPENROUTER_BASE_URL,
         stt_model=_clean(os.getenv("STT_MODEL")) or DEFAULT_STT_MODEL,
         tts_model=_clean(os.getenv("TTS_MODEL")) or DEFAULT_TTS_MODEL,
+        tts_fallback_model=_clean(os.getenv("TTS_FALLBACK_MODEL"))
+        or FALLBACK_TTS_MODEL,
         llm_model=_clean(os.getenv("INTERVIEWER_MODEL")) or DEFAULT_LLM_MODEL,
+        llm_fallback_model=_clean(os.getenv("INTERVIEWER_FALLBACK_MODEL"))
+        or FALLBACK_LLM_MODEL,
         sessions_dir=sessions_dir,
     )
 

@@ -45,9 +45,16 @@ OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 #: Environment variable holding the OpenRouter API key.
 API_KEY_ENV = "OPENROUTER_API_KEY"
 
-#: Default classification model — a capable model is worth it for the sort,
-#: which is run once per interview and off the latency-critical path.
-DEFAULT_MODEL = "anthropic/claude-sonnet-4.5"
+#: Default classification model (Job 3, Decision 0001) — Claude Opus 4.7.
+#: The authoritative sort runs once per interview, off the latency-critical
+#: path: accuracy is the right axis, so the strong model is worth it.
+#: Overridable via ``CLASSIFY_MODEL`` without a code change.
+DEFAULT_MODEL = "anthropic/claude-opus-4.7"
+
+#: Challenger / fallback classification model — GLM-5.1. Per Decision 0001
+#: (Amendment A) it is the challenger, promoted to primary only if the G17
+#: harness shows accuracy parity. Overridable via ``CLASSIFY_FALLBACK_MODEL``.
+FALLBACK_MODEL = "z-ai/glm-5.1"
 
 #: The classification prompt lives next to the other analysis prompts.
 _PROMPT_PATH = Path(__file__).resolve().parent.parent / "prompts" / "classify.md"
@@ -287,10 +294,19 @@ def _strip_code_fence(text: str) -> str:
 # ---------------------------------------------------------------------------
 
 
+def resolve_classify_model() -> str:
+    """Return the classification model — ``CLASSIFY_MODEL`` env, else default.
+
+    Lets a deployment swap the Job 3 model without a code change while
+    keeping the approved :data:`DEFAULT_MODEL` (Claude Opus 4.7) as default.
+    """
+    return os.environ.get("CLASSIFY_MODEL") or DEFAULT_MODEL
+
+
 def classify(
     transcript_xml: str,
     *,
-    model: str = DEFAULT_MODEL,
+    model: Optional[str] = None,
     api_key: Optional[str] = None,
     client: Optional[object] = None,
 ) -> ClassificationResult:
@@ -299,6 +315,10 @@ def classify(
     ``transcript_xml`` is the interview transcript already wrapped as escaped
     XML — use :func:`wrap_transcript_xml` to produce it from ``(speaker,
     text)`` turns.
+
+    ``model`` defaults to :func:`resolve_classify_model` — the approved
+    Job 3 model (Claude Opus 4.7), overridable via the ``CLASSIFY_MODEL``
+    environment variable.
 
     The call routes through OpenRouter via the ``openai`` SDK and requests
     structured JSON output. The response is validated locally into a typed
@@ -316,10 +336,11 @@ def classify(
     """
     active_client = client if client is not None else get_openrouter_client(api_key)
     system_prompt = load_classify_prompt()
+    chosen_model = model or resolve_classify_model()
 
     try:
         completion = active_client.chat.completions.create(  # type: ignore[attr-defined]
-            model=model,
+            model=chosen_model,
             messages=[
                 {"role": "system", "content": system_prompt},
                 {

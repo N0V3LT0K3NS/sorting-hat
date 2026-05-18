@@ -60,6 +60,8 @@ __all__ = [
     "VALID_TEMPLATES",
     "TEMPLATE_MODELS",
     "DEFAULT_MODEL",
+    "FALLBACK_MODEL",
+    "resolve_fill_model",
     "FillError",
     "MissingAPIKeyError",
     "FillParseError",
@@ -85,9 +87,17 @@ TEMPLATE_MODELS: dict[str, type[BaseModel]] = {
     "arc": ArcResult,
 }
 
-#: Default slot-filling model. Filling is run once per interview, off the
-#: latency-critical path, so a capable model is worth it for vivid copy.
-DEFAULT_MODEL = "anthropic/claude-sonnet-4.5"
+#: Default slot-filling model (Job 4, Decision 0001) — Claude Opus 4.7.
+#: Filling is run once per interview, off the latency-critical path, so the
+#: strong model is worth it for the vivid, sharp, non-generic register the
+#: meme copy needs. Overridable via ``FILL_MODEL`` without a code change.
+DEFAULT_MODEL = "anthropic/claude-opus-4.7"
+
+#: Challenger / fallback slot-filling model — GLM-5.1. Per Decision 0001 it
+#: is the challenger, A/B-tested against Opus in G17; its proven strength is
+#: reasoning, not prose, so it earns primary only by measured output.
+#: Overridable via ``FILL_FALLBACK_MODEL``.
+FALLBACK_MODEL = "z-ai/glm-5.1"
 
 #: The slot-filling prompt lives next to the other analysis prompts.
 _PROMPT_PATH = Path(__file__).resolve().parent.parent / "prompts" / "fill.md"
@@ -266,12 +276,21 @@ def _probe_result_to_json(probe_result: object) -> str:
 # ---------------------------------------------------------------------------
 
 
+def resolve_fill_model() -> str:
+    """Return the slot-filling model — ``FILL_MODEL`` env, else default.
+
+    Lets a deployment swap the Job 4 model without a code change while
+    keeping the approved :data:`DEFAULT_MODEL` (Claude Opus 4.7) as default.
+    """
+    return os.environ.get("FILL_MODEL") or DEFAULT_MODEL
+
+
 def fill(
     template_label: str,
     transcript: str,
     probe_result: object = None,
     *,
-    model: str = DEFAULT_MODEL,
+    model: Optional[str] = None,
     api_key: Optional[str] = None,
     client: Optional[object] = None,
 ) -> BaseModel:
@@ -280,6 +299,9 @@ def fill(
     ``template_label`` is the label chosen by stage 1 — one of ``iceberg``,
     ``two_buttons``, ``compass``, ``arc``. It is taken as fixed; this stage
     does not re-classify.
+
+    ``model`` defaults to :func:`resolve_fill_model` — the approved Job 4
+    model (Claude Opus 4.7), overridable via the ``FILL_MODEL`` env var.
 
     ``transcript`` is the interview transcript. If it does not already look
     like a wrapped ``<transcript>`` element it is wrapped as escaped XML via
@@ -313,6 +335,7 @@ def fill(
     active_client = client if client is not None else get_openrouter_client(api_key)
     system_prompt = load_fill_prompt()
     probe_json = _probe_result_to_json(probe_result)
+    chosen_model = model or resolve_fill_model()
 
     user_content = (
         f"Template label (fixed, do not re-classify): {label}\n\n"
@@ -327,7 +350,7 @@ def fill(
 
     try:
         completion = active_client.chat.completions.create(  # type: ignore[attr-defined]
-            model=model,
+            model=chosen_model,
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_content},
