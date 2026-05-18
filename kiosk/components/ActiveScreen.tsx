@@ -9,6 +9,7 @@ import {
 } from "@livekit/components-react";
 import { ConnectionState } from "livekit-client";
 import styles from "../app/kiosk.module.css";
+import { SessionProgress } from "./SessionProgress";
 
 /**
  * Screen 2 — Active. Rendered inside a `<LiveKitRoom>`. Shows the agent's
@@ -90,6 +91,20 @@ export function ActiveScreen({ onComplete }: { onComplete: () => void }) {
         {"  "}
         {label}
       </div>
+
+      {/* A calm, building sense of how far the conversation has come. */}
+      <SessionProgress />
+
+      {/* A deliberate, low-prominence way to leave the interview. Routes
+          through the same onComplete path the agent/disconnect uses, so the
+          LiveKitRoom teardown (mic release, peer connection) happens once. */}
+      <button
+        className={styles.endButton}
+        onClick={onComplete}
+        aria-label="End the interview"
+      >
+        End
+      </button>
 
       {/* Hidden hotspot in the corner — for dev/debug only, off by default. */}
       <button
