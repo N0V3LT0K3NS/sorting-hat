@@ -32,15 +32,18 @@ from agent.interviewer import (
 )
 from agent.session_finalize import (
     CLASSIFICATION_FILENAME,
+    IN_PROGRESS_STAGES,
     LIVE_STATE_FILENAME,
     RESULT_FILENAME,
     STATE_FILENAME,
     STATUS_FILENAME,
+    TERMINAL_STAGES,
     TRANSCRIPT_FILENAME,
     finalize_session,
     persist_transcript,
     run_offline_pipeline,
     session_dir,
+    write_interrupted_status,
     write_live_state,
     write_status,
 )
@@ -766,3 +769,173 @@ def test_wired_hook_writes_live_state_each_turn(sessions_dir) -> None:
     assert live["signals"]["two_buttons"] == 0.6
     assert live["turn_count"] == 2
     assert live["base_questions_total"] == BASE_QUESTION_COUNT
+
+
+# ---------------------------------------------------------------------------
+# 7. Durability — an interrupted pipeline never leaves a session silently stuck
+# ---------------------------------------------------------------------------
+#
+# The live bug: the pipeline ran classify, advanced status.json to "filling",
+# then the worker PROCESS STOPPED mid-fill. status.json froze at
+# {"stage": "filling", "error": null} forever — a soft failure the kiosk
+# polls indefinitely. These tests prove status.json reaches an honest terminal
+# state whatever interrupts the run.
+
+
+def test_write_status_stamps_updated_at(sessions_dir) -> None:
+    """Every status.json write carries an updated_at timestamp.
+
+    The delivery server's stale-run detection ages the file off this field, so
+    it must always be present.
+    """
+    write_status("sess-ts", "filling", sessions_dir=sessions_dir)
+    status = _read_status(sessions_dir / "sess-ts")
+    assert status["updated_at"]
+    # An ISO-8601 string that parses.
+    from datetime import datetime
+
+    datetime.fromisoformat(status["updated_at"])
+
+
+def test_write_interrupted_status_marks_a_frozen_in_progress_status(
+    sessions_dir,
+) -> None:
+    """A status.json frozen at an in-progress stage is rewritten as 'error'.
+
+    Simulates the live bug directly: status.json says "filling" with error
+    null (the worker died after write_status("filling") but before fill
+    finished). write_interrupted_status must turn it into a terminal error.
+    """
+    write_status("sess-frozen", "filling", sessions_dir=sessions_dir)
+    pre = _read_status(sessions_dir / "sess-frozen")
+    assert pre["stage"] == "filling" and pre["error"] is None
+
+    written = write_interrupted_status("sess-frozen", sessions_dir=sessions_dir)
+    assert written is not None
+
+    post = _read_status(sessions_dir / "sess-frozen")
+    assert post["stage"] == "error"
+    assert post["error"]  # non-null — explains the run did not complete
+    assert "filling" in post["error"]
+
+
+def test_write_interrupted_status_leaves_a_terminal_status_alone(
+    sessions_dir,
+) -> None:
+    """A status.json already at 'done' or 'error' is not touched."""
+    write_status("sess-done", "done", sessions_dir=sessions_dir)
+    assert write_interrupted_status("sess-done", sessions_dir=sessions_dir) is None
+    assert _read_status(sessions_dir / "sess-done")["stage"] == "done"
+
+    write_status("sess-already-err", "error", sessions_dir=sessions_dir,
+                 error="render: original failure")
+    assert (
+        write_interrupted_status("sess-already-err", sessions_dir=sessions_dir)
+        is None
+    )
+    # The original error message survives — the backstop did not clobber it.
+    assert (
+        _read_status(sessions_dir / "sess-already-err")["error"]
+        == "render: original failure"
+    )
+
+
+def test_write_interrupted_status_noop_when_no_status_file(sessions_dir) -> None:
+    """No status.json at all -> nothing written (the pipeline never started)."""
+    assert (
+        write_interrupted_status("sess-never-ran", sessions_dir=sessions_dir)
+        is None
+    )
+    assert not (sessions_dir / "sess-never-ran" / STATUS_FILENAME).exists()
+
+
+def test_pipeline_finally_marks_status_when_inner_is_interrupted(
+    sessions_dir, monkeypatch
+) -> None:
+    """A pipeline interrupted mid-stage ends with a terminal error status.
+
+    Simulates the worker process being killed mid-fill: the fill stage raises
+    a BaseException (SystemExit — what process termination raises), which the
+    stage's ``except Exception`` does NOT catch, so it propagates out of the
+    inner pipeline body. run_offline_pipeline's try/finally backstop must then
+    rewrite status.json — frozen at "filling" — as a terminal 'error'.
+    """
+    from pipeline import classify as classify_mod
+    from pipeline import fill as fill_mod
+    from pipeline.classify import ClassificationResult
+
+    def fake_classify(transcript_xml, **kwargs):
+        return ClassificationResult(
+            template="iceberg", confidence=0.9, reasoning="clear."
+        )
+
+    def killed_fill(*args, **kwargs):
+        # Process termination — not an ordinary Exception, so the stage's
+        # ``except Exception`` does not swallow it.
+        raise SystemExit("worker process terminated mid-fill")
+
+    monkeypatch.setattr(classify_mod, "classify", fake_classify)
+    monkeypatch.setattr(fill_mod, "fill", killed_fill)
+
+    state = _peopled_state()
+    # The interruption propagates; run_offline_pipeline's finally still runs.
+    with pytest.raises(SystemExit):
+        run_offline_pipeline("sess-killed", state, sessions_dir=sessions_dir)
+
+    # status.json is NOT frozen at "filling" — the backstop made it terminal.
+    status = _read_status(sessions_dir / "sess-killed")
+    assert status["stage"] == "error"
+    assert status["error"]  # non-null message
+    assert status["stage"] not in IN_PROGRESS_STAGES
+
+
+def test_pipeline_never_ends_in_progress_with_null_error(
+    sessions_dir, monkeypatch
+) -> None:
+    """After any run ends, status.json is never in-progress with error null.
+
+    The contract Fix 1 guarantees: a frozen {"stage": "filling", "error": null}
+    is exactly the soft failure. Whatever path the run takes — clean, a caught
+    stage failure, or a hard interruption — the final status.json is either a
+    terminal stage or carries a non-null error.
+    """
+    from pipeline import classify as classify_mod
+    from pipeline import fill as fill_mod
+    from pipeline.classify import ClassificationResult
+
+    def fake_classify(transcript_xml, **kwargs):
+        return ClassificationResult(
+            template="iceberg", confidence=0.9, reasoning="clear."
+        )
+
+    def killed_fill(*args, **kwargs):
+        raise KeyboardInterrupt("ctrl-c mid-fill")
+
+    monkeypatch.setattr(classify_mod, "classify", fake_classify)
+    monkeypatch.setattr(fill_mod, "fill", killed_fill)
+
+    state = _peopled_state()
+    with pytest.raises(KeyboardInterrupt):
+        run_offline_pipeline("sess-no-lie", state, sessions_dir=sessions_dir)
+
+    status = _read_status(sessions_dir / "sess-no-lie")
+    # The soft failure must not survive: not in-progress, or error non-null.
+    assert not (status["stage"] in IN_PROGRESS_STAGES and status["error"] is None)
+    assert status["stage"] in TERMINAL_STAGES
+
+
+def test_clean_pipeline_run_leaves_a_done_status_untouched(
+    sessions_dir, monkeypatch
+) -> None:
+    """The backstop is a no-op for a clean run — status.json stays 'done'.
+
+    The interruption guard's finally calls write_interrupted_status on every
+    run; a run that reached 'done' is already terminal, so it is left alone.
+    """
+    _mock_pipeline(monkeypatch)
+    state = _peopled_state()
+    summary = run_offline_pipeline("sess-clean", state, sessions_dir=sessions_dir)
+    assert summary["delivered"] is True
+    status = _read_status(sessions_dir / "sess-clean")
+    assert status["stage"] == "done"
+    assert status["error"] is None

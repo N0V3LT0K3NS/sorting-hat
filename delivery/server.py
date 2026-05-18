@@ -122,6 +122,18 @@ KNOWN_STAGES = {
     "error",
 }
 
+#: The in-progress pipeline stages — a status.json frozen at one of these is
+#: "still working". A frozen-but-stale one (the worker died mid-stage) is a
+#: soft failure; :func:`read_status` ages these out to ``error``.
+_IN_PROGRESS_STAGES = {"classifying", "filling", "rendering", "delivering"}
+
+#: How long an in-progress status.json may go un-updated before the delivery
+#: server treats it as a dead run. The pipeline rewrites status.json at every
+#: stage boundary, so any single stage taking longer than this means the
+#: worker process is almost certainly gone. Generous — the kiosk's own reveal
+#: timeout is 5 min; this only needs to catch a genuinely orphaned run.
+STALE_STATUS_SECONDS = 10 * 60
+
 #: A session id must be a single safe folder name — no separators, no ``..``.
 _SAFE_SESSION_ID = re.compile(r"^[A-Za-z0-9._-]+$")
 
@@ -141,6 +153,40 @@ def _is_safe_session_id(session_id: str) -> bool:
     )
 
 
+def _status_is_stale(raw: dict, status_path: Path) -> bool:
+    """True when an in-progress status.json has gone un-updated too long.
+
+    Ages off an orphaned run. The age is taken from the status.json's
+    ``updated_at`` field (an ISO-8601 string the pipeline stamps on every
+    write); if that is absent or unparseable, the file's mtime is used as a
+    fallback. A status updated within :data:`STALE_STATUS_SECONDS` is fresh
+    (the pipeline is still working); anything older is treated as dead.
+
+    Never raises — a stat or parse failure degrades to "not stale" so a
+    transient hiccup never spuriously errors a live run.
+    """
+    now = datetime.now(timezone.utc)
+    updated_raw = raw.get("updated_at")
+    updated_at: Optional[datetime] = None
+    if isinstance(updated_raw, str) and updated_raw.strip():
+        try:
+            parsed = datetime.fromisoformat(updated_raw.strip())
+            # A naive timestamp is assumed UTC so the subtraction below works.
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            updated_at = parsed
+        except ValueError:
+            updated_at = None
+    if updated_at is None:
+        try:
+            updated_at = datetime.fromtimestamp(
+                status_path.stat().st_mtime, tz=timezone.utc
+            )
+        except OSError:
+            return False
+    return (now - updated_at).total_seconds() > STALE_STATUS_SECONDS
+
+
 def read_status(session_id: str, *, sessions_dir: Optional[Path] = None) -> dict:
     """Return the pipeline-progress dict for ``session_id``.
 
@@ -152,6 +198,14 @@ def read_status(session_id: str, *, sessions_dir: Optional[Path] = None) -> dict
     A missing session folder or missing/corrupt status.json degrades to stage
     ``pending`` — never raises. ``portrait_url`` / ``qr_url`` are filled with
     relative paths once the stage is ``done`` and the files exist on disk.
+
+    **Stale-run detection.** status.json is written optimistically — an
+    in-progress stage like ``filling`` is set when the stage *starts*. If the
+    worker process dies mid-stage the file freezes there with ``error`` null,
+    and a naive poll would spin forever. So an in-progress stage whose
+    ``updated_at`` is older than :data:`STALE_STATUS_SECONDS` (or whose
+    status.json mtime is, when no timestamp is present) is reported as
+    ``error`` — the kiosk's poll resolves to a terminal state.
     """
     root = sessions_dir if sessions_dir is not None else sessions_root()
     folder = Path(root) / session_id
@@ -170,6 +224,24 @@ def read_status(session_id: str, *, sessions_dir: Optional[Path] = None) -> dict
                 stage = "error"
                 error = f"unknown stage {candidate!r} in status.json"
             error = raw.get("error") if error is None else error
+
+            # Stale-run detection: an in-progress stage that has not been
+            # updated within STALE_STATUS_SECONDS means the worker process is
+            # gone (the pipeline rewrites status.json at every stage boundary).
+            if stage in _IN_PROGRESS_STAGES and _status_is_stale(
+                raw, status_path
+            ):
+                logger.warning(
+                    "session %s: status.json stuck at '%s' and stale — "
+                    "reporting it as a dead run",
+                    session_id,
+                    stage,
+                )
+                error = (
+                    f"pipeline stalled at stage '{stage}' — the worker "
+                    "process appears to have stopped before completing"
+                )
+                stage = "error"
         except (json.JSONDecodeError, OSError) as exc:
             logger.warning("session %s: status.json unreadable (%s)", session_id, exc)
             stage = "error"

@@ -24,9 +24,11 @@ The four pipeline functions are imported and *called*, never modified.
 
 from __future__ import annotations
 
+import atexit
 import json
 import logging
 import os
+import signal
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -211,6 +213,20 @@ def write_live_state(
 # ---------------------------------------------------------------------------
 
 
+# The in-progress pipeline stages — stages where status.json says "still
+# working". A status.json frozen at one of these (because the worker process
+# died mid-stage) is a soft failure: the kiosk would poll it forever. The
+# durability guard below and the delivery server's stale-check both key off
+# this set to tell "still working" apart from "this run is dead".
+IN_PROGRESS_STAGES = frozenset(
+    {"classifying", "filling", "rendering", "delivering"}
+)
+
+# Terminal stages — a status.json at one of these is final; the kiosk can stop
+# polling. The durability guard never overwrites a terminal status.
+TERMINAL_STAGES = frozenset({"done", "error"})
+
+
 def write_status(
     session_id: str,
     stage: str,
@@ -226,10 +242,19 @@ def write_status(
     stage-by-stage reveal during generation. A plain, idempotent rewrite — no
     DB, no streaming infra; the kiosk just polls the file.
 
+    An ``updated_at`` ISO-8601 timestamp is stamped on every write so the
+    delivery server can age-check a stale in-progress status (a status.json
+    frozen at e.g. ``filling`` because the worker process died mid-stage).
+
     Returns the status.json path.
     """
     folder = session_dir(session_id, sessions_dir)
-    status: dict = {"session_id": str(session_id), "stage": stage, "error": error}
+    status: dict = {
+        "session_id": str(session_id),
+        "stage": stage,
+        "error": error,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
     (folder / STATUS_FILENAME).write_text(
         json.dumps(status, indent=2, ensure_ascii=False),
         encoding="utf-8",
@@ -238,9 +263,146 @@ def write_status(
     return folder / STATUS_FILENAME
 
 
+def _status_stage(session_id: str, sessions_dir: Optional[Path]) -> Optional[str]:
+    """Return the ``stage`` recorded in status.json, or ``None`` if unreadable.
+
+    A small read-back helper for the durability guard: it must not overwrite a
+    status.json that already reached a terminal stage (the pipeline finished,
+    or already recorded its own error).
+    """
+    folder = session_dir(session_id, sessions_dir)
+    status_path = folder / STATUS_FILENAME
+    if not status_path.is_file():
+        return None
+    try:
+        raw = json.loads(status_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return None
+    if not isinstance(raw, dict):
+        return None
+    stage = raw.get("stage")
+    return str(stage) if stage is not None else None
+
+
+def write_interrupted_status(
+    session_id: str,
+    *,
+    sessions_dir: Optional[Path] = None,
+    reason: str = "the pipeline process exited before the run completed",
+) -> Optional[Path]:
+    """Write a terminal ``error`` status.json *only if* the run did not finish.
+
+    The durability backstop for an interrupted pipeline. ``run_offline_pipeline``
+    writes status.json optimistically — it sets ``filling`` when fill *starts* —
+    so if the worker process is killed (SIGTERM) or otherwise dies mid-stage,
+    status.json is frozen forever at an in-progress stage with ``error`` null,
+    and the kiosk polls it indefinitely.
+
+    This function is wired to run on process termination (a signal handler /
+    ``atexit``) and as the ``finally`` of :func:`run_offline_pipeline`. It reads
+    the current status.json and:
+
+    * if the stage is already terminal (``done`` / ``error``) — does nothing;
+      the run finished, or already recorded its own failure.
+    * if the stage is in-progress (``classifying`` … ``delivering``) — rewrites
+      status.json as stage ``error`` with a non-null message, so the kiosk's
+      poll resolves to a real terminal state instead of spinning forever.
+    * if there is no status.json — does nothing; the pipeline never started, so
+      there is nothing to mark as interrupted.
+
+    Returns the status.json path when it wrote one, else ``None``. Never raises:
+    a backstop that crashed would defeat its own purpose.
+    """
+    try:
+        stage = _status_stage(session_id, sessions_dir)
+        if stage is None or stage in TERMINAL_STAGES:
+            return None
+        message = f"{reason} (interrupted at stage '{stage}')"
+        logger.warning(
+            "session %s: pipeline status was '%s' at exit — recording "
+            "terminal error so the kiosk does not poll forever",
+            session_id,
+            stage,
+        )
+        return write_status(
+            session_id, "error", sessions_dir=sessions_dir, error=message
+        )
+    except Exception as exc:  # a backstop must never crash the exit path
+        logger.warning(
+            "session %s: write_interrupted_status failed (%s)", session_id, exc
+        )
+        return None
+
+
 # ---------------------------------------------------------------------------
 # Offline pipeline (fix 3)
 # ---------------------------------------------------------------------------
+
+
+def _install_interruption_guard(
+    session_id: str, sessions_dir: Optional[Path]
+):
+    """Install a SIGTERM/SIGINT + atexit backstop for an interrupted pipeline.
+
+    ``run_offline_pipeline`` writes status.json optimistically. If the worker
+    process is killed mid-stage (a LiveKit ``dev`` worker is not durable) the
+    file freezes at an in-progress stage with ``error`` null and the kiosk
+    polls it forever. This installs two backstops that call
+    :func:`write_interrupted_status`:
+
+    * an ``atexit`` hook — covers an uncaught exit / interpreter shutdown;
+    * SIGTERM and SIGINT handlers — cover the process being killed (the live
+      bug). Each handler records the terminal status, then re-raises the
+      default disposition so the process still terminates.
+
+    Returns a ``remove()`` callable the ``finally`` block calls once the
+    pipeline has finished cleanly, so the guard never fires for a completed
+    run and never leaks across pipeline invocations. Signal handlers are only
+    installed when running on the main thread (``signal.signal`` requires it);
+    off the main thread the ``atexit`` hook and the ``finally`` block still
+    cover the common cases.
+    """
+    def _backstop(*_args) -> None:
+        write_interrupted_status(session_id, sessions_dir=sessions_dir)
+
+    atexit.register(_backstop)
+
+    installed: list = []
+    for signum in (signal.SIGTERM, signal.SIGINT):
+        try:
+            previous = signal.getsignal(signum)
+
+            def _handler(sig, frame, _prev=previous):
+                _backstop()
+                # Restore and re-raise so the process still terminates as it
+                # normally would for this signal.
+                signal.signal(sig, _prev)
+                if callable(_prev) and _prev not in (
+                    signal.SIG_DFL, signal.SIG_IGN
+                ):
+                    _prev(sig, frame)
+                else:
+                    os.kill(os.getpid(), sig)
+
+            signal.signal(signum, _handler)
+            installed.append((signum, previous))
+        except (ValueError, OSError):
+            # signal.signal raises ValueError off the main thread — the
+            # atexit hook + the finally block still cover the run there.
+            pass
+
+    def remove() -> None:
+        try:
+            atexit.unregister(_backstop)
+        except Exception:
+            pass
+        for signum, previous in installed:
+            try:
+                signal.signal(signum, previous)
+            except (ValueError, OSError):
+                pass
+
+    return remove
 
 
 def run_offline_pipeline(
@@ -257,9 +419,44 @@ def run_offline_pipeline(
     stage where it can; the transcript is already safe on disk from
     :func:`persist_transcript`, so a degraded pipeline never loses data.
 
+    **Durability against an interrupted process.** status.json is written
+    optimistically — ``filling`` is set when fill *starts*. If the worker
+    process is killed mid-stage, the file would freeze at an in-progress stage
+    with ``error`` null and the kiosk would poll it forever. So the whole run
+    is wrapped: a SIGTERM/SIGINT + ``atexit`` guard, plus a ``finally`` block,
+    both call :func:`write_interrupted_status`, which rewrites a non-terminal
+    status.json as a real terminal ``error``. A run that reaches ``done`` or
+    ``error`` normally is already terminal, so the backstop is a no-op for it.
+
     Returns a small dict of which stages produced output — handy for tests
     and logging. Never raises: a parlor-game kiosk must not crash because an
     API key is absent.
+    """
+    remove_guard = _install_interruption_guard(session_id, sessions_dir)
+    try:
+        return _run_offline_pipeline_inner(
+            session_id, state, sessions_dir=sessions_dir
+        )
+    finally:
+        # The pipeline reached its own terminal status (done or error) for
+        # every path through _run_offline_pipeline_inner, *unless* it raised or
+        # the process is dying. write_interrupted_status only writes when the
+        # status is still non-terminal, so this is a no-op for a clean run and
+        # the honest terminal-status write for an interrupted one.
+        write_interrupted_status(session_id, sessions_dir=sessions_dir)
+        remove_guard()
+
+
+def _run_offline_pipeline_inner(
+    session_id: str,
+    state: InterviewState,
+    *,
+    sessions_dir: Optional[Path] = None,
+) -> dict:
+    """The pipeline body — see :func:`run_offline_pipeline` for the contract.
+
+    Split out so :func:`run_offline_pipeline` can wrap it in the interruption
+    guard without the durability plumbing cluttering the stage logic.
     """
     # Imported here, not at module load, so importing this module never drags
     # in the pipeline's optional deps (openai SDK, pillow, qrcode).
@@ -488,8 +685,11 @@ __all__ = [
     "persist_transcript",
     "write_live_state",
     "write_status",
+    "write_interrupted_status",
     "run_offline_pipeline",
     "finalize_session",
+    "IN_PROGRESS_STAGES",
+    "TERMINAL_STAGES",
     "TRANSCRIPT_FILENAME",
     "STATE_FILENAME",
     "CLASSIFICATION_FILENAME",
