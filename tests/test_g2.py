@@ -60,9 +60,13 @@ def test_config_loads_with_no_env_vars(clean_env: None) -> None:
     assert cfg.has_livekit is False
     assert cfg.has_openrouter is False
 
-    # Defaults still apply for non-secret fields.
+    # Defaults still apply for non-secret fields — the approved Decision 0001
+    # per-job model selection (docs/decisions/0001-model-selection.md).
     assert cfg.stt_model == "deepgram/flux-general-en"
-    assert cfg.tts_model == "cartesia/sonic-3"
+    assert cfg.tts_model == "inworld/inworld-tts-1.5-max"
+    assert cfg.tts_fallback_model == "cartesia/sonic-3"
+    assert cfg.llm_model == "anthropic/claude-haiku-4.5"
+    assert cfg.llm_fallback_model == "anthropic/claude-sonnet-4.6"
     assert cfg.openrouter_base_url == "https://openrouter.ai/api/v1"
     assert isinstance(cfg.sessions_dir, Path)
 

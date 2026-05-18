@@ -3,8 +3,8 @@
 This is the brief's step 1. No interview logic, no probes, no classification —
 just a working low-latency voice loop, to prove the stack:
 
-* **STT / TTS** via LiveKit Inference (Deepgram Flux STT, Cartesia Sonic-3 TTS)
-  behind the single ``LIVEKIT`` key.
+* **STT / TTS** via LiveKit Inference (Deepgram Flux STT, Inworld TTS 1.5-max
+  TTS — see Decision 0001) behind the single ``LIVEKIT`` key.
 * **LLM** via OpenRouter — OpenAI-compatible — using the ``openai`` plugin's
   ``with_openrouter`` factory (``base_url=https://openrouter.ai/api/v1``).
 * **Native turn detector** (the transformer EOU model), the **adaptive
@@ -98,13 +98,24 @@ class SessionParts:
 
 
 def build_llm(cfg: Config) -> openai.LLM:
-    """Construct the interviewer LLM, routed through OpenRouter.
+    """Construct the interviewer LLM (Job 1), routed through OpenRouter.
 
     Uses the ``openai`` plugin's ``with_openrouter`` factory — an OpenAI-
     compatible client pointed at ``base_url=https://openrouter.ai/api/v1``.
     Streaming is the plugin default for ``LLM.chat()`` and is intentionally
     left enabled; the fragile bit (token-streaming through a custom base_url)
     must be confirmed by a live smoke test, see this module's docstring.
+
+    Per Decision 0001, Job 1 is the live interviewer brain:
+
+    * primary ``cfg.llm_model`` (Claude Haiku 4.5), fallback
+      ``cfg.llm_fallback_model`` (Sonnet 4.6) — passed as ``fallback_models``
+      so OpenRouter routes to it if the primary is unavailable;
+    * ``provider={"sort": "latency"}`` — prefer the lowest-p50 endpoint, the
+      metric that matters for the sub-800ms voice budget;
+    * reasoning is left OFF — ``reasoning_effort`` is intentionally not set,
+      so no reasoning parameter is sent. The in-call job is bounded (persona
+      + ordered questions + warm follow-ups), not frontier reasoning.
 
     A missing key does not raise — graceful degradation is a locked
     constraint. When ``OPENROUTER_API_KEY`` is absent the plugin is built with
@@ -120,6 +131,8 @@ def build_llm(cfg: Config) -> openai.LLM:
         api_key=api_key,
         base_url=cfg.openrouter_base_url,
         app_name="sorting-hat",
+        fallback_models=[cfg.llm_fallback_model],
+        provider={"sort": "latency"},
     )
 
 
@@ -286,11 +299,17 @@ def run_dry_run() -> int:
     cfg = load_config()
     missing = cfg.warn_missing()
     logger.info(
-        "config loaded: stt=%s tts=%s llm=%s sessions_dir=%s",
+        "config loaded: stt=%s tts=%s (fallback %s) llm=%s (fallback %s) "
+        "sessions_dir=%s",
         cfg.stt_model,
         cfg.tts_model,
+        cfg.tts_fallback_model,
         cfg.llm_model,
+        cfg.llm_fallback_model,
         cfg.sessions_dir,
+    )
+    logger.info(
+        "interviewer LLM (Job 1): provider routing sort=latency, reasoning OFF"
     )
     if missing:
         logger.info(
