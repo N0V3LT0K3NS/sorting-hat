@@ -3,13 +3,31 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { LiveKitRoom } from "@livekit/components-react";
 import type { AudioCaptureOptions, RoomConnectOptions } from "livekit-client";
+import dynamic from "next/dynamic";
 import styles from "../app/kiosk.module.css";
 import { IdleScreen } from "./IdleScreen";
 import { ActiveScreen } from "./ActiveScreen";
 import { CompleteScreen } from "./CompleteScreen";
 import { NoiseCancellation } from "./NoiseCancellation";
 import { checkAudioInput } from "../lib/audioPreflight";
+import { shapeRotatorInterfaceEnabled } from "../lib/interfaceMode";
 import { installKioskGuards, requestFullscreen } from "../lib/kioskMode";
+
+const ShapeIdleScreen = dynamic(
+  () => import("./shape/ShapeIdleScreen").then((mod) => mod.ShapeIdleScreen),
+  { ssr: false },
+);
+const ShapeActiveScreen = dynamic(
+  () => import("./shape/ShapeActiveScreen").then((mod) => mod.ShapeActiveScreen),
+  { ssr: false },
+);
+const ShapeCompleteScreen = dynamic(
+  () =>
+    import("./shape/ShapeCompleteScreen").then(
+      (mod) => mod.ShapeCompleteScreen,
+    ),
+  { ssr: false },
+);
 
 /**
  * The kiosk session lifecycle.
@@ -64,6 +82,7 @@ const AUDIO_CAPTURE: AudioCaptureOptions = {
 const CONNECT_OPTIONS: RoomConnectOptions = { autoSubscribe: true };
 
 export function Kiosk() {
+  const useShapeInterface = shapeRotatorInterfaceEnabled();
   const [phase, setPhase] = useState<Phase>("idle");
   const [connecting, setConnecting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -165,11 +184,19 @@ export function Kiosk() {
   return (
     <main className={styles.stage}>
       {phase === "idle" && (
-        <IdleScreen
-          onBegin={handleBegin}
-          connecting={connecting}
-          error={error}
-        />
+        useShapeInterface ? (
+          <ShapeIdleScreen
+            onBegin={handleBegin}
+            connecting={connecting}
+            error={error}
+          />
+        ) : (
+          <IdleScreen
+            onBegin={handleBegin}
+            connecting={connecting}
+            error={error}
+          />
+        )
       )}
 
       {phase === "active" && connection && (
@@ -191,18 +218,32 @@ export function Kiosk() {
           {/* Enhanced (Krisp) noise cancellation for the rough public-space
               audio. Mounted inside the room so it can reach the mic track. */}
           <NoiseCancellation />
-          <ActiveScreen
-            sessionId={connection.roomName}
-            onComplete={handleComplete}
-          />
+          {useShapeInterface ? (
+            <ShapeActiveScreen
+              sessionId={connection.roomName}
+              onComplete={handleComplete}
+            />
+          ) : (
+            <ActiveScreen
+              sessionId={connection.roomName}
+              onComplete={handleComplete}
+            />
+          )}
         </LiveKitRoom>
       )}
 
       {phase === "complete" && (
-        <CompleteScreen
-          sessionId={sessionId}
-          onRevealDone={handleRevealDone}
-        />
+        useShapeInterface ? (
+          <ShapeCompleteScreen
+            sessionId={sessionId}
+            onRevealDone={handleRevealDone}
+          />
+        ) : (
+          <CompleteScreen
+            sessionId={sessionId}
+            onRevealDone={handleRevealDone}
+          />
+        )
       )}
     </main>
   );
